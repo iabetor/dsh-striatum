@@ -1,0 +1,7 @@
+# Bundle patch layer: the row loads the package's main entry as the host half
+# (a plain Cordis plugin that registers ctx.striatum and the session/event
+# listener); the `dsh.client` declaration makes the web app load its ./client
+# bundle as the browser half.
+- insert:
+    - id: dsh-striatum
+      name: dsh-striatum
