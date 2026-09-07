@@ -146,14 +146,28 @@ describe('keep', () => {
     expect(res.ok).toBe(true)
   })
 
-  it('keep fails when file unreadable', async () => {
+  it('keep of a deleted file accepts the deletion and drops the entry', async () => {
     const fs = new FakeFs({ [A]: A1 })
     const r = make(fs)
     await r.recordChange({ turn: 1, step: 1, path: A, oldText: A0, newText: A1 })
     fs.contents.delete(A) // 文件被删
     const res = await r.keep(A)
-    expect(res.ok).toBe(false)
-    expect(res.reason).toBe('unreadable')
+    expect(res.ok).toBe(true) // keep = 接受现状(含删除)
+    expect(r.hasPending(A)).toBe(false)
+    expect(r.snapshot().files[A]).toBeUndefined() // 条目移除,不再跟踪
+    expect(await r.fileViews()).toHaveLength(0)
+  })
+
+  it('recordChange read failure keeps prior lastKnownHash', async () => {
+    const fs = new FakeFs({ [A]: A1 })
+    const r = make(fs)
+    await r.recordChange({ turn: 1, step: 1, seq: 10, path: A, oldText: A0, newText: A1 })
+    const before = r.snapshot().files[A]!.lastKnownHash
+    expect(before).not.toBeNull()
+    // 文件被删后,adopt 回放再次登记同一事件 —— 不得抹掉 lastKnownHash
+    fs.contents.delete(A)
+    await r.recordChanges([{ turn: 1, step: 1, seq: 10, path: A, oldText: A0, newText: A1 }], 10)
+    expect(r.snapshot().files[A]!.lastKnownHash).toBe(before)
   })
 
   it('keepAll keeps every pending file', async () => {
@@ -239,6 +253,48 @@ describe('persistence round-trip', () => {
     const st = emptySessionState('other')
     const r = new ChangeRegistry('sess-1', fs, st)
     expect(r.snapshot().sessionId).toBe('sess-1')
+    expect(r.snapshot().files).toEqual({})
+  })
+})
+
+describe('seq cursor & idempotent replay', () => {
+  it('recordChanges with seq advances lastSeq', async () => {
+    const fs = new FakeFs({ [A]: A1 })
+    const r = make(fs)
+    await r.recordChanges([{ turn: 1, step: 1, seq: 10, path: A, oldText: null, newText: A1 }], 10)
+    expect(r.snapshot().lastSeq).toBe(10)
+    expect(r.hasPending(A)).toBe(true)
+  })
+
+  it('replaying an already-consumed seq is a no-op (idempotent)', async () => {
+    const fs = new FakeFs({ [A]: A1 })
+    const r = make(fs)
+    await r.recordChanges([{ turn: 1, step: 1, seq: 10, path: A, oldText: null, newText: A1 }], 10)
+    // 重启后对账重放同样的 seq(或更早)——不得重复登记
+    await r.recordChanges([{ turn: 1, step: 1, seq: 10, path: A, oldText: null, newText: A1 }], 10)
+    await r.recordChanges([{ turn: 1, step: 1, seq: 5, path: A, oldText: null, newText: A1 }], 5)
+    expect(r.snapshot().files[A]!.changeCount).toBe(1)
+    expect(r.snapshot().records).toHaveLength(1)
+    expect(r.snapshot().lastSeq).toBe(10)
+  })
+
+  it('replay after cursor applies only newer events', async () => {
+    const fs = new FakeFs({ [A]: A2 })
+    const r = make(fs)
+    await r.recordChanges([{ turn: 1, step: 1, seq: 10, path: A, oldText: null, newText: A1 }], 10)
+    // 重启后日志新增 seq 12(第 2 轮改 A2)
+    fs.agentWrite(A, A2)
+    await r.recordChanges([{ turn: 2, step: 1, seq: 12, path: A, oldText: null, newText: A2 }], 12)
+    expect(r.snapshot().files[A]!.changeCount).toBe(2)
+    expect(r.snapshot().files[A]!.turns).toEqual([1, 2])
+    expect(r.snapshot().lastSeq).toBe(12)
+  })
+
+  it('empty replay (no diffs) still advances the cursor', async () => {
+    const fs = new FakeFs()
+    const r = make(fs)
+    await r.recordChanges([], 20)
+    expect(r.snapshot().lastSeq).toBe(20)
     expect(r.snapshot().files).toEqual({})
   })
 })

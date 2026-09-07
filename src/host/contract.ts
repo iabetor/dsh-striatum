@@ -16,6 +16,8 @@ export interface KeepResult {
 export interface StriatumServiceFace {
   /** 登记一次改动(捕获层)。 */
   record(sessionId: string, input: ChangeInput): Promise<void>
+  /** 批量登记 + 推进 seq 游标(对账回放用)。 */
+  recordSeq(sessionId: string, inputs: readonly ChangeInput[], seq: number): Promise<void>
   /** Keep 单文件或全部(path 省略 = 全部)。 */
   keep(sessionId: string, path?: string): Promise<KeepResult>
   /** Undo 单文件(写回基线 + 状态更新);冲突抛 UndoError。 */

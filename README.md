@@ -27,7 +27,9 @@ See [dsh-striatum-design.md](../dsh-striatum-design.md) for the full design.
 
 - **M0 ✅** probe: external plugins receive `tool/result` with `meta.diffs` intact; the file is already in its after state when the event arrives; `ctx.fs`/`sandboxPolicy`/`sessions` are injectable.
 - **M1 ✅** skeleton: repo + `ChangeRegistry` (pure file-level state machine) with unit tests; dual-half build.
-- M2 (host capture + API + store), M3 (client UI), M4 (polish) — in progress.
+- **M2 ✅** host: `session/event` capture (edit + overwrite diffs; create registration falls back to the paired `tool/call` via `sourceEventSeqs`), JSONL persistence per session, `/striatum/api` (state/keep/undo) + `/striatum/events` SSE, undo writes via `ctx.fs` under the session sandbox.
+- **M3 ✅** client: `conversation.chat.turnTail` per-turn confirm strip (select-claimed chain) + `conversation.input.dock` overview card, driven by the `striatum-turns` conversation definition and SSE refresh.
+- **M4 ⏳** in progress: external-modification guard, no-baseline disable, collapse state, cross-restart reconciliation (per-session `lastSeq` cursor replay) and i18n are implemented and unit-tested (38/38 green); a real web-profile walkthrough of the Keep/Undo loop remains (requires a GUI restart to load the rebuilt host).
 
 ## Development
 

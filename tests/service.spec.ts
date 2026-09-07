@@ -42,7 +42,7 @@ async function makeService(fs: MockFs): Promise<{ service: StriatumService; root
   const root = await mkdtemp(join(tmpdir(), 'striatum-test-'))
   roots.push(root)
   const ctx = new Context()
-  const service = new StriatumService(ctx, { root }, fs, mockSessions as never)
+  const service = new StriatumService(ctx, { root }, fs, mockSessions as never, undefined)
   return { service, root }
 }
 
@@ -121,7 +121,7 @@ describe('StriatumService', () => {
 
     // 模拟重启:新 service 实例,同一 root
     const ctx2 = new Context()
-    const service2 = new StriatumService(ctx2, { root }, fs, mockSessions as never)
+    const service2 = new StriatumService(ctx2, { root }, fs, mockSessions as never, undefined)
     const st = await service2.state('sess-1')
     expect(st.files).toHaveLength(1)
     // turns 只含「自上次 keep 以来」的 pending 轮次(第 1 轮已 keep)
@@ -129,5 +129,32 @@ describe('StriatumService', () => {
     // 重建后仍可 undo 到基线 A1
     await service2.undo('sess-1', A)
     expect(fs.contents.get(A)).toBe(A1)
+  })
+
+  it('recordSeq applies batch with cursor; restart replays only newer seq', async () => {
+    const fs = new MockFs({ [A]: A1 })
+    const { service, root } = await makeService(fs)
+    // 一次 result 的多 diff / 对账回放
+    await service.recordSeq('sess-1', [
+      { turn: 1, step: 1, seq: 8, path: A, oldText: null, newText: A1 },
+    ], 8)
+    expect((await service.state('sess-1')).files).toHaveLength(1)
+
+    // 模拟崩溃在 seq 8 之后:重启,对账回放 seq 8 + 新 seq 9
+    fs.contents.set(A, A2)
+    const ctx2 = new Context()
+    const service2 = new StriatumService(ctx2, { root }, fs, mockSessions as never, undefined)
+    await service2.recordSeq('sess-1', [
+      { turn: 1, step: 1, seq: 8, path: A, oldText: null, newText: A1 }, // 已消费 → 跳过
+      { turn: 1, step: 2, seq: 9, path: A, oldText: null, newText: A2 }, // 新 → 登记
+    ], 9)
+    const st = await service2.state('sess-1')
+    expect(st.files[0]).toMatchObject({ path: A, changeCount: 2, turns: [1] })
+    // 游标已到 9,再次全量回放不再登记
+    await service2.recordSeq('sess-1', [
+      { turn: 1, step: 1, seq: 8, path: A, oldText: null, newText: A1 },
+      { turn: 1, step: 2, seq: 9, path: A, oldText: null, newText: A2 },
+    ], 9)
+    expect((await service2.state('sess-1')).files[0]!.changeCount).toBe(2)
   })
 })

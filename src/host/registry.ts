@@ -21,6 +21,8 @@ export interface ChangeInput {
   oldText: string | null
   newText: string
   createdAt?: number
+  /** 事件 seq(对账/去重游标)。 */
+  seq?: number
 }
 
 /** 单文件内部状态(JSON-serializable)。 */
@@ -65,6 +67,11 @@ export interface PersistedSessionState {
   sessionId: string
   files: Record<string, PersistedFileState>
   records: PersistedDisplayRecord[]
+  /**
+   * 已登记到的会话日志最大事件 seq(firehose/对账的游标)。
+   * 重启对账时只补登 seq > lastSeq 的事件(幂等);旧存档无此字段 = 0。
+   */
+  lastSeq: number
 }
 
 export type UndoErrorCode = 'no-pending' | 'no-baseline' | 'hash-mismatch' | 'file-unreadable'
@@ -127,11 +134,17 @@ export function parsePersistedState(raw: unknown): PersistedSessionState | undef
       createdAt: typeof r.createdAt === 'number' ? r.createdAt : 0,
     })
   }
-  return { version: 1, sessionId: raw.sessionId, files, records }
+  return {
+    version: 1,
+    sessionId: raw.sessionId,
+    files,
+    records,
+    lastSeq: typeof raw.lastSeq === 'number' && Number.isFinite(raw.lastSeq) ? raw.lastSeq : 0,
+  }
 }
 
 export function emptySessionState(sessionId: string): PersistedSessionState {
-  return { version: 1, sessionId, files: {}, records: [] }
+  return { version: 1, sessionId, files: {}, records: [], lastSeq: 0 }
 }
 
 /** 同文件登记的 turn 合并。 */
@@ -203,18 +216,46 @@ export class ChangeRegistry {
         changeCount: 0,
       }
       this.state.files[path] = file
-    } else {
+    } else if (facts.currentHash !== null) {
+      // 只在成功读到文件时更新 lastKnownHash。读失败(null,文件被删/不可读)
+      // 时保留原值 —— 否则 adopt 回放历史事件会抹掉已删除文件的 hash,
+      // 导致后续 keep/undo 一律 unreadable 卡死。
       file.lastKnownHash = facts.currentHash
     }
     mergeTurn(file, input.turn)
     file.changeCount += 1
 
     this.state.records.push({ turn: input.turn, step: input.step, path, createdAt: now })
+    if (typeof input.seq === 'number') this.advanceSeq(input.seq)
+  }
+
+  /** 推进对账游标(只前进)。 */
+  advanceSeq(seq: number): void {
+    if (Number.isFinite(seq) && seq > this.state.lastSeq) this.state.lastSeq = seq
+  }
+
+  /**
+   * 批量登记(一次 tool/result 事件的全部 diff,或对账回放的一段)。
+   * 带 seq 的输入按游标幂等过滤(seq <= lastSeq 已消费过,跳过);
+   * 全部应用后推进游标到 seq。
+   */
+  async recordChanges(inputs: readonly ChangeInput[], seq?: number): Promise<void> {
+    let applied = 0
+    for (const input of inputs) {
+      if (input.seq !== undefined && input.seq <= this.state.lastSeq) continue
+      await this.recordChange(input)
+      applied += 1
+    }
+    if (typeof seq === 'number') this.advanceSeq(seq)
+    return
   }
 
   /**
    * Keep 某文件:读当前内容为新基线(纯元数据,不写文件),清 pending。
    * 文件条目保留(基线供未来 undo)。
+   *
+   * 文件当前不存在(被删/移走)时:keep = 接受现状(含删除),清 pending 并移除条目
+   * —— 文件已不在工作区,继续跟踪无意义,也不该让 keepAll 报 failed。
    */
   async keep(pathRaw: string): Promise<{ ok: boolean; reason?: 'unreadable' | 'no-pending' }> {
     const path = this.io.normalizePath(pathRaw)
@@ -222,7 +263,10 @@ export class ChangeRegistry {
     if (file === undefined || !hasPending(file)) return { ok: true, reason: 'no-pending' }
     const facts = await this.io.readFacts(path)
     if (facts.currentContent === null || facts.currentHash === null) {
-      return { ok: false, reason: 'unreadable' }
+      // 文件不存在 → 接受删除:清 pending 并移除条目(不再跟踪)。
+      this.state.records = this.state.records.filter(r => r.path !== path)
+      delete this.state.files[path]
+      return { ok: true, reason: 'no-pending' }
     }
     file.baseline = facts.currentContent
     file.baselineHash = facts.currentHash

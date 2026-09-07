@@ -33,7 +33,12 @@ export interface StriatumFsFace {
 
 /** 结构面:sessions 服务(拿会话 cwd)。 */
 export interface SessionsFace {
-  get(id: string): { header?: { cwd?: string } } | undefined
+  get(id: string): { header?: { cwd?: string }; id?: string } | undefined
+}
+
+/** 结构面:sandboxPolicy 服务(undo 写回时按会话解析 workspace-write policy)。 */
+export interface SandboxPolicyFace {
+  resolve(request?: { session?: unknown; mode?: string }): { mode: string; workspaceRoot: string; sessionId?: string }
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -72,6 +77,7 @@ export class StriatumService extends Service implements StriatumServiceFace {
     private readonly config: { root: string },
     private readonly fs: StriatumFsFace,
     private readonly sessions: SessionsFace | undefined,
+    private readonly sandboxPolicy: SandboxPolicyFace | undefined,
   ) {
     super(ctx, 'striatum')
   }
@@ -118,6 +124,24 @@ export class StriatumService extends Service implements StriatumServiceFace {
     this.sse.broadcast({ kind: 'registered', sessionId })
   }
 
+  /** 批量登记 + 推进 seq 游标(对账回放 / 一次 result 多 diff)。 */
+  async recordSeq(sessionId: string, inputs: readonly ChangeInput[], seq: number): Promise<void> {
+    const registry = await this.registryFor(sessionId)
+    if (inputs.length === 0) {
+      // 无改动也推进游标:避免已消费事件在重启后被重复对账。
+      registry.advanceSeq(seq)
+      // 但从未登记过的会话(纯读/bash)不落盘 —— 避免为无关会话建空 JSONL。
+      const snap = registry.snapshot()
+      if (Object.keys(snap.files).length > 0 || snap.records.length > 0) {
+        await this.persist(sessionId, registry)
+      }
+      return
+    }
+    await registry.recordChanges(inputs, seq)
+    await this.persist(sessionId, registry)
+    this.sse.broadcast({ kind: 'registered', sessionId })
+  }
+
   /** Keep 单文件或全部。 */
   async keep(sessionId: string, path?: string): Promise<KeepResult> {
     const registry = await this.registryFor(sessionId)
@@ -137,10 +161,16 @@ export class StriatumService extends Service implements StriatumServiceFace {
   async undo(sessionId: string, path: string): Promise<void> {
     const registry = await this.registryFor(sessionId)
     const prep = await registry.prepareUndo(path)
-    // 经 ctx.fs 原子写回
+    // 经 ctx.fs 原子写回;必须带按会话解析的 sandbox policy(workspace-write,
+    // workspaceRoot = 会话 cwd),否则沙箱后端按默认模式(可能 read-only)拒绝。
     const cwd = this.cwdOf(sessionId) ?? process.cwd()
     const target = await this.fs.resolve(path, { cwd })
-    await this.fs.writeText(target, prep.content)
+    let policy: unknown
+    if (this.sandboxPolicy !== undefined) {
+      const session = this.sessions?.get(sessionId)
+      policy = this.sandboxPolicy.resolve({ session })
+    }
+    await this.fs.writeText(target, prep.content, undefined, undefined, policy)
     registry.commitUndoWrite(path)
     await this.persist(sessionId, registry)
   }
@@ -179,12 +209,13 @@ export const inject = ['sessions']
 
 export function apply(ctx: Context, config: Config = {}): void {
   const root = storageRoot(config.root)
-  // fs 是条件服务(headless 也有;经 inject 拿引用,避免 Service 内访问未声明 ctx 属性)
-  ctx.inject(['fs'], (fsCtx) => {
+  // fs/sandboxPolicy 是条件服务(headless 也有;经 inject 拿引用,避免 Service 内访问未声明 ctx 属性)
+  ctx.inject(['fs', 'sandboxPolicy'], (fsCtx) => {
     const fs = (fsCtx as unknown as { fs: StriatumFsFace }).fs
+    const sandboxPolicy = (fsCtx as unknown as { sandboxPolicy?: SandboxPolicyFace }).sandboxPolicy
     const sessions = (ctx as unknown as { sessions?: SessionsFace }).sessions
     // Service 构造经 static provide 自动注册 ctx.striatum,勿再手动 provide。
-    const service = new StriatumService(ctx, { root }, fs, sessions)
+    const service = new StriatumService(ctx, { root }, fs, sessions, sandboxPolicy)
 
     // capture:监听会话事件自动登记改动
     registerCapture(ctx, service)
