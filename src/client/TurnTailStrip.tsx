@@ -13,6 +13,7 @@
 import type { TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-chat/client'
 import type { FileStateView } from '../shared/wire.ts'
 import { fetchState, keep, undo } from './api.ts'
+import { subscribeStriatumEvents } from './events.ts'
 import { useEffect, useState, h, type CSSProperties } from './react.ts'
 
 /** 本组件经槽位注入的能力。 */
@@ -50,16 +51,20 @@ export function TurnTailStripBody({ turn, sessionId, t, openFile }: TurnTailStri
 
   useEffect(() => {
     let cancelled = false
-    setFiles(null)
-    fetchState(sessionId)
-      .then(state => {
-        if (cancelled) return
-        setFiles(pendingForTurn(state, turnNum))
-      })
-      .catch(() => {
-        if (!cancelled) setFiles([])
-      })
-    return () => { cancelled = true }
+    const load = (): void => {
+      fetchState(sessionId)
+        .then(state => {
+          if (cancelled) return
+          setFiles(pendingForTurn(state, turnNum))
+        })
+        .catch(() => {
+          if (!cancelled) setFiles([])
+        })
+    }
+    load()
+    // 订阅 host 变更(OverviewStrip 的 keep/undo 也广播),让本条的
+    // pending 状态与总览条同步 —— 否则总览条 keep 后本条仍显示陈旧改动。
+    return subscribeStriatumEvents(() => { if (!cancelled) load() })
   }, [sessionId, turnNum]) // eslint-disable-line react-hooks/exhaustive-deps
 
   if (files === null || files.length === 0) return null
