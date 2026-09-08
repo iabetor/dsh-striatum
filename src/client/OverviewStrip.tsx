@@ -121,21 +121,32 @@ export function OverviewStripBody({ t, sessionId }: OverviewStripProps) {
 
   return h('div', { 'data-striatum-overview': '', style: dockStyle },
     h('div', { style: cardStyle },
-      // 头行(固定 36px):计数 + 操作
-      h('div', { style: headerStyle },
+      // 头行(固定 36px):整行可点切换展开/收起(▸/▾);Keep/撤销按钮点击不冒泡。
+      h('div', {
+        style: { ...headerStyle, cursor: 'pointer', userSelect: 'none' },
+        onClick: () => { setExpanded(v => !v) },
+        title: t(expanded ? 'striatum.collapse' : 'striatum.expand'),
+      },
+        h('span', {
+          style: { fontWeight: 600, flex: 'none', fontFamily: 'monospace', color: 'var(--dsw-alias-label-secondary, #888)' },
+          'aria-hidden': true,
+        }, expanded ? '▾' : '▸'),
         h('span', { style: { fontWeight: 600, flex: 'none' } },
           `${t('striatum.label')} · ${t('striatum.files', { count: String(files.length) })}`),
         h('span', { style: { flex: 1 } }),
-        h('button', { type: 'button', disabled: busyPath !== null, onClick: () => { void onKeep() }, style: btnStyle },
-          t('striatum.keepAll')),
         h('button', {
           type: 'button', disabled: busyPath !== null,
-          onClick: () => { void Promise.all(files.map(f => onUndo(f.path).catch(() => undefined))) },
+          onClick: (event: MouseEvent) => { event.stopPropagation(); void onKeep() },
+          style: btnStyle,
+        }, t('striatum.keepAll')),
+        h('button', {
+          type: 'button', disabled: busyPath !== null,
+          onClick: (event: MouseEvent) => {
+            event.stopPropagation()
+            void Promise.all(files.map(f => onUndo(f.path).catch(() => undefined)))
+          },
           style: dangerStyle,
         }, t('striatum.undoAll')),
-        h('button', {
-          type: 'button', onClick: () => { setExpanded(v => !v) }, style: btnStyle,
-        }, t(expanded ? 'striatum.collapse' : 'striatum.expand')),
       ),
       // 展开的文件列表(限高滚动)
       expanded
