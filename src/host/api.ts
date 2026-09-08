@@ -78,6 +78,10 @@ export function writeError(res: ServerResponse, error: unknown): void {
       writeJson(res, 400, { ok: false, code: 'no-pending', message: e.message ?? 'no pending change', path: e.path })
       return
     }
+    if (e.code === 'file-unreadable') {
+      writeJson(res, 400, { ok: false, code: 'file-unreadable', message: e.message ?? 'cannot read current file content', path: e.path })
+      return
+    }
   }
   const message = error instanceof Error ? error.message : String(error)
   writeJson(res, 500, { ok: false, code: 'internal', message })

@@ -110,9 +110,11 @@ export function OverviewStripBody({ t, sessionId }: OverviewStripProps) {
       await undo(sessionId, path)
       refresh()
     } catch (e) {
-      const msg = e instanceof StriatumApiClientError && e.code === 'conflict'
-        ? t('striatum.conflict')
-        : e instanceof Error ? e.message : String(e)
+      const known = e instanceof StriatumApiClientError
+        ? e.code === 'conflict' ? t('striatum.conflict')
+          : e.code === 'file-unreadable' ? t('striatum.unreadable') : undefined
+        : undefined
+      const msg = known ?? (e instanceof Error ? e.message : String(e))
       setError(`${t('striatum.undoRefused')}: ${msg}`)
     } finally { setBusyPath(null) }
   }
