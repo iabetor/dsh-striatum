@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionSeq } from '@deepseek-ai/dsh-session'
 import { StriatumService, type StriatumFsFace } from '../src/index.ts'
 import { registerCapture } from '../src/host/capture.ts'
 
@@ -105,8 +105,8 @@ function resultEvent(seq: number, turn: number, meta: unknown, callSeq: number, 
       message: { role: 'user', content: [], source: { kind: 'tool', callId: `c-${callSeq}` } },
       ...(meta === undefined ? {} : { meta }),
     },
-  } as unknown as SessionEvent & { sourceEventSeqs?: number[] }
-  event.sourceEventSeqs = [callSeq]
+  } as unknown as SessionEvent & { sourceEventSeqs?: SessionSeq[] }
+  event.sourceEventSeqs = [callSeq as SessionSeq]
   return event
 }
 
