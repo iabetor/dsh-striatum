@@ -131,6 +131,21 @@ describe('StriatumService', () => {
     expect(fs.contents.get(A)).toBe(A1)
   })
 
+  it('concurrent first touch returns one shared registry (adopt replay ∥ UI state)', async () => {
+    const fs = new MockFs({ [A]: A1 })
+    const { service } = await makeService(fs)
+    // adopt 回放与 UI 的 state() 会并发首次触达同一会话:两条路径必须拿到同一实例,
+    // 否则后建实例覆盖 map 中先建实例,一方登记的状态另一方读不到。
+    const [r1, r2] = await Promise.all([
+      service.registryFor('sess-1'),
+      service.registryFor('sess-1'),
+    ])
+    expect(r1).toBe(r2)
+    // 经 r1 登记后,服务读数必须看得到(不被覆盖实例吞掉)
+    await r1.recordChange({ turn: 1, step: 1, path: A, oldText: A0, newText: A1 })
+    expect((await service.state('sess-1')).files).toHaveLength(1)
+  })
+
   it('recordSeq applies batch with cursor; restart replays only newer seq', async () => {
     const fs = new MockFs({ [A]: A1 })
     const { service, root } = await makeService(fs)

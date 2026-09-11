@@ -70,6 +70,12 @@ export class StriatumService extends Service implements StriatumServiceFace {
   static provide = 'striatum'
 
   private readonly registries = new Map<string, ChangeRegistry>()
+  /**
+   * 首次构造中的 registry 承诺(每会话一条)。adopt 回放与 UI 的 state() 会并发
+   * 首次触达同一会话;两条路径都走 registryFor,若各自 await 后各建一个实例,
+   * 后写入 map 的会覆盖先前的,导致一方登记的状态被另一方读不到。
+   */
+  private readonly pendingRegistries = new Map<string, Promise<ChangeRegistry>>()
   private readonly sseClients = new Set<ServerResponse>()
 
   constructor(
@@ -104,10 +110,26 @@ export class StriatumService extends Service implements StriatumServiceFace {
     await writeSessionState(this.config.root, registry.snapshot())
   }
 
-  /** 取某会话 registry(首次从 store 重建,惰性)。 */
+  /**
+   * 取某会话 registry(首次从 store 重建,惰性)。
+   * 并发首次触达(adopt 回放 ∥ UI state())共享同一次构造,返回同一实例。
+   */
   async registryFor(sessionId: string): Promise<ChangeRegistry> {
     const existing = this.registries.get(sessionId)
     if (existing !== undefined) return existing
+    const inFlight = this.pendingRegistries.get(sessionId)
+    if (inFlight !== undefined) return inFlight
+    const creating = this.createRegistry(sessionId)
+    this.pendingRegistries.set(sessionId, creating)
+    try {
+      return await creating
+    } finally {
+      this.pendingRegistries.delete(sessionId)
+    }
+  }
+
+  /** 构造并登记一个会话 registry(仅经 registryFor 调用,保证每会话一次)。 */
+  private async createRegistry(sessionId: string): Promise<ChangeRegistry> {
     const cwd = this.cwdOf(sessionId)
     const io = makeFileIo(this.fs, cwd)
     const stored = await readSessionState(this.config.root, safeSessionId(sessionId))
@@ -192,6 +214,7 @@ export class StriatumService extends Service implements StriatumServiceFace {
   /** 释放某会话(会话删除时)。 */
   disposeSession(sessionId: string): void {
     this.registries.delete(sessionId)
+    this.pendingRegistries.delete(sessionId)
   }
 }
 
