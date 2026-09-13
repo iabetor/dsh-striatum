@@ -1,7 +1,7 @@
 /**
  * dsh-striatum — client /striatum/api 封装(typed fetch)。
  */
-import type { StriatumState } from '../shared/wire.ts'
+import type { FileChangesView, StriatumState } from '../shared/wire.ts'
 
 /** API 错误。 */
 export class StriatumApiClientError extends Error {
@@ -58,4 +58,19 @@ export function keep(sessionId: string, path?: string): Promise<{ ok: boolean; p
 /** Undo 单文件。冲突抛 StriatumApiClientError(code=conflict)。 */
 export function undo(sessionId: string, path: string): Promise<{ ok: boolean; paths: string[] }> {
   return call('undo', { sessionId, path })
+}
+
+/** 取某文件的改动视图(文件预览渲染器用)。 */
+export function fetchChanges(sessionId: string, path: string, signal?: AbortSignal): Promise<FileChangesView> {
+  return call<FileChangesView>('changes', { sessionId, path }, signal)
+}
+
+/** 接受一个改动块(基线前移;不写文件)。 */
+export function acceptHunk(sessionId: string, path: string, index: number): Promise<{ ok: boolean; paths: string[] }> {
+  return call('acceptHunk', { sessionId, path, index })
+}
+
+/** 撤销一个改动块(写回该块的改动前片段)。 */
+export function revertHunk(sessionId: string, path: string, index: number): Promise<{ ok: boolean; paths: string[] }> {
+  return call('revertHunk', { sessionId, path, index })
 }

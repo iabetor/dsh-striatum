@@ -167,6 +167,33 @@ export function registerStriatumApi(
             writeOk(res, { ok: true, paths: [path] })
             return
           }
+          case 'changes': {
+            const path = typeof body.path === 'string' ? body.path : ''
+            if (path === '') throw new StriatumApiError('bad-request', 'path is required')
+            writeOk(res, await service.changes(sessionId, path))
+            return
+          }
+          case 'acceptHunk': {
+            const path = typeof body.path === 'string' ? body.path : ''
+            const index = typeof body.index === 'number' ? body.index : Number.NaN
+            if (path === '' || !Number.isInteger(index)) {
+              throw new StriatumApiError('bad-request', 'path and integer index are required')
+            }
+            const ok = await service.acceptHunk(sessionId, path, index)
+            if (!ok) throw new StriatumApiError('not-found', 'no such change to accept', 404)
+            writeOk(res, { ok: true, paths: [path] })
+            return
+          }
+          case 'revertHunk': {
+            const path = typeof body.path === 'string' ? body.path : ''
+            const index = typeof body.index === 'number' ? body.index : Number.NaN
+            if (path === '' || !Number.isInteger(index)) {
+              throw new StriatumApiError('bad-request', 'path and integer index are required')
+            }
+            await service.revertHunk(sessionId, path, index)
+            writeOk(res, { ok: true, paths: [path] })
+            return
+          }
           default:
             throw new StriatumApiError('not-found', `unknown method "${method}"`, 404)
         }

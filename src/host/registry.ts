@@ -10,7 +10,13 @@
  * @module dsh-striatum/host/registry
  */
 
-import type { DisplayRecordView, FileStateView } from '../shared/wire.ts'
+import type { DisplayRecordView, FileChangesView, FileStateView } from '../shared/wire.ts'
+import {
+  acceptHunk as acceptHunkIn,
+  hunksOf,
+  revertHunk as revertHunkIn,
+  type Hunk,
+} from './hunks.ts'
 
 /** 一次登记的输入(来自 tool/result 的 meta.diffs + 事件归属)。 */
 export interface ChangeInput {
@@ -20,6 +26,22 @@ export interface ChangeInput {
   path: string
   oldText: string | null
   newText: string
+  /**
+   * 本次登记是否为「新建文件」(write 创建,改动前不存在)。
+   *
+   * 显式标注而不是靠 `oldText === null` 推断:harness 对「纯插入式 edit」同样
+   * 给 `oldText: null`(见 computeHunkDiffs 注释),两者语义完全不同 —— 前者
+   * 的改动前是空文件(可整篇显示为新增),后者只是 hunk 没带删除侧。
+   */
+  created?: boolean
+  /**
+   * 本次改动**之前**的完整文件内容(tools/execute 包装器从工具返回值取得)。
+   *
+   * 只在文件尚无基线时用作基线 —— 这样"改动过就能看到 diff",不必先 Keep。
+   * 已有基线时忽略(基线由 Keep / 块级接受推进,不能被历史快照回退)。
+   * 新建文件为 null(改动前不存在)。
+   */
+  beforeText?: string | null
   createdAt?: number
   /** 事件 seq(对账/去重游标)。 */
   seq?: number
@@ -39,6 +61,12 @@ export interface PersistedFileState {
   turns: number[]
   /** 累计改动次数(登记次数;UI 展示「改了几次」)。 */
   changeCount: number
+  /**
+   * 本条目自登记以来是否经历过「新建」。为真时 diff 的基线视为空文件 ——
+   * 这样从未 keep 过的新建文件也能显示「整篇新增」,与 CodeBuddy 等
+   * 审查工具的呈现一致。keep 之后由真实基线接管(见 keep())。
+   */
+  created: boolean
 }
 
 /** 展示记录(仅 UI):记录每次登记的轮/步/路径。 */
@@ -59,6 +87,65 @@ export interface FileFacts {
 export interface FileIo {
   readFacts(path: string): Promise<FileFacts>
   normalizePath(path: string): string
+}
+
+/**
+ * 一个文件 diff 两侧文本的上限(字符)。超过则不下发,客户端显示降级提示 ——
+ * 超大文件的全文对比既无阅读价值,也会撑爆一次 state 响应。
+ */
+export const DIFF_TEXT_MAX = 256 * 1024
+
+/**
+ * 解析某文件的对比基线。
+ *
+ * 优先级:
+ *  1. 已有真实基线(keep 过,hunk-keep 也会前移它)→ 用它;
+ *  2. 从未 keep 但该条目是「新建」→ 基线视为**空文件**,整篇显示为新增;
+ *  3. 其余(已有文件、从未 keep)→ null,调用方显示「暂无基线」提示。
+ * @param file - 该文件的持久化状态。
+ * @returns 基线全文,或 null(无可对比基线)。
+ */
+function baselineOf(file: PersistedFileState): string | null {
+  return file.baseline ?? (file.created ? '' : null)
+}
+
+/**
+ * 组装某文件的改动视图(hunks + 各项能力位)。
+ *
+ * 当前内容不可读、无基线、或任一侧超过 {@link DIFF_TEXT_MAX} 时,hunks 为空数组
+ * 但仍回报 readable/hasBaseline,让 UI 能给出准确的降级提示。
+ * @param file - 该文件的持久化状态。
+ * @param facts - 刚读到的文件事实。
+ * @returns 单文件改动视图。
+ */
+function changesOf(file: PersistedFileState, facts: FileFacts): FileChangesView {
+  const current = facts.currentContent
+  const baseline = baselineOf(file)
+  const tooBig = baseline !== null && current !== null
+    && (baseline.length > DIFF_TEXT_MAX || current.length > DIFF_TEXT_MAX)
+  const usable = current !== null && baseline !== null && !tooBig
+  return {
+    path: file.path,
+    tracked: true,
+    hasBaseline: file.baseline !== null,
+    created: file.baseline === null && file.created,
+    hunks: usable ? hunksOf(baseline, current) : [],
+    canUndo: file.baseline !== null && hasPending(file),
+    diffLimited: tooBig,
+  }
+}
+
+/** striatum 未跟踪的文件:只有"无改动"这一事实,不编造其它。 */
+export function untrackedChangesView(path: string): FileChangesView {
+  return {
+    path,
+    tracked: false,
+    hasBaseline: false,
+    created: false,
+    hunks: [],
+    canUndo: false,
+    diffLimited: false,
+  }
 }
 
 /** 一个会话的完整持久化状态。 */
@@ -122,6 +209,8 @@ export function parsePersistedState(raw: unknown): PersistedSessionState | undef
       lastPendingTurn: num(value.lastPendingTurn, 0),
       turns,
       changeCount: num(value.changeCount, 0),
+      // 旧存档无此字段 = false(只影响未 keep 的新建文件的 diff 呈现,不影响 keep/undo)。
+      created: value.created === true,
     }
   }
   const records: PersistedDisplayRecord[] = []
@@ -207,21 +296,30 @@ export class ChangeRegistry {
     if (file === undefined) {
       file = {
         path,
-        baseline: null,
-        baselineHash: null,
+        // 首次登记即用「改动前内容」当基线 → 改动过就有 diff,不必先 Keep。
+        // beforeText 为 null(新建/后端不提供)时留 null,由 created 走空基线。
+        baseline: input.beforeText ?? null,
+        baselineHash: input.beforeText === undefined || input.beforeText === null
+          ? null
+          : hashOf(input.beforeText),
         lastKnownHash: facts.currentHash,
         firstPendingTurn: input.turn,
         lastPendingTurn: input.turn,
         turns: [input.turn],
         changeCount: 0,
+        created: input.created === true,
       }
       this.state.files[path] = file
+      // beforeText 给了基线但基线等于当前内容(空改动)→ 无待确认,条目仍保留
+      // 基线供将来对比(与 keep 的"基线在、pending 空"一致)。
     } else if (facts.currentHash !== null) {
       // 只在成功读到文件时更新 lastKnownHash。读失败(null,文件被删/不可读)
       // 时保留原值 —— 否则 adopt 回放历史事件会抹掉已删除文件的 hash,
       // 导致后续 keep/undo 一律 unreadable 卡死。
       file.lastKnownHash = facts.currentHash
     }
+    // 「新建」对本条目是单调事实:一旦为真就保持,直到 keep 以真实基线接管。
+    if (input.created === true) file.created = true
     mergeTurn(file, input.turn)
     file.changeCount += 1
 
@@ -271,6 +369,8 @@ export class ChangeRegistry {
     file.baseline = facts.currentContent
     file.baselineHash = facts.currentHash
     file.lastKnownHash = facts.currentHash
+    // 真实基线已接管:此后 diff 以它为准,不再借用「新建 = 空文件」的推断。
+    file.created = false
     clearPending(file)
     this.state.records = this.state.records.filter(r => r.path !== path)
     return { ok: true }
@@ -327,6 +427,110 @@ export class ChangeRegistry {
     if (facts.currentHash === null) return { ok: false, reason: 'file-unreadable' }
     if (facts.currentHash !== file.lastKnownHash) return { ok: false, reason: 'hash-mismatch' }
     return { ok: true }
+  }
+
+  /**
+   * 取某文件当前可操作的改动块。
+   *
+   * 现算而非读存储:块的行号会随文件演进漂移,存下来必然失效。基线取法与
+   * {@link baselineOf} 一致(真实基线 → 新建空基线 → 无基线则空列表)。
+   * @param pathRaw - 文件路径。
+   * @returns 改动块列表;无基线、不可读或超限时为空数组。
+   */
+  async hunksFor(pathRaw: string): Promise<Hunk[]> {
+    const path = this.io.normalizePath(pathRaw)
+    const file = this.state.files[path]
+    if (file === undefined) return []
+    const facts = await this.io.readFacts(path).catch(() => ({ currentContent: null, currentHash: null }))
+    return changesOf(file, facts).hunks
+  }
+
+  /**
+   * 接受一个改动块:基线前移该块。
+   *
+   * 语义是"这一段我认可了" —— 只动元数据(不写文件),与文件级 keep 同族。
+   * @param pathRaw - 文件路径。
+   * @param index - 块索引(以 {@link hunksFor} 的当次结果为准)。
+   * @returns 是否成功。
+   */
+  async acceptHunk(pathRaw: string, index: number): Promise<boolean> {
+    const path = this.io.normalizePath(pathRaw)
+    const file = this.state.files[path]
+    if (file === undefined) return false
+    const facts = await this.io.readFacts(path).catch(() => ({ currentContent: null, currentHash: null }))
+    const baseline = baselineOf(file)
+    if (baseline === null || facts.currentContent === null) return false
+    const next = acceptHunkIn(baseline, facts.currentContent, index)
+    if (next === null) return false
+    file.baseline = next
+    file.baselineHash = hashOf(next)
+    // 基线已覆盖到 current 时,该文件不再有待决改动 → 条目移除(与 keep 同语义)。
+    if (next === facts.currentContent) {
+      file.created = false
+      file.lastKnownHash = facts.currentHash
+      clearPending(file)
+      this.state.records = this.state.records.filter(r => r.path !== path)
+      return true
+    }
+    // 新建文件一旦获得真实基线就不再是"整篇新增"。
+    file.created = file.created && next === ''
+    if (facts.currentHash !== null) file.lastKnownHash = facts.currentHash
+    return true
+  }
+
+  /**
+   * 撤销一个改动块:算出应写回磁盘的内容(不写)。
+   * @param pathRaw - 文件路径。
+   * @param index - 块索引。
+   * @returns 应写回的内容与路径;失败抛 {@link UndoError}。
+   */
+  async prepareRevertHunk(pathRaw: string, index: number): Promise<{ content: string, path: string }> {
+    const path = this.io.normalizePath(pathRaw)
+    const file = this.state.files[path]
+    if (file === undefined || !hasPending(file)) {
+      throw new UndoError('no-pending', 'no pending change for this file', path)
+    }
+    const facts = await this.io.readFacts(path)
+    const baseline = baselineOf(file)
+    if (baseline === null || facts.currentContent === null) {
+      throw new UndoError('no-baseline', 'no baseline to revert this hunk against', path)
+    }
+    const next = revertHunkIn(baseline, facts.currentContent, index)
+    if (next === null) {
+      throw new UndoError('no-pending', 'this change is no longer present in the file', path)
+    }
+    return { content: next, path }
+  }
+
+  /**
+   * 撤销某块后更新状态。
+   *
+   * 与 {@link commitUndoWrite} 的区别:文件级 undo 之后回到基线、条目删除;块级
+   * undo 只回退一段,其余改动仍在 → 条目保留,只更新 lastKnownHash。若写回结果
+   * 已等于基线(最后一块也被撤销),则与文件级同归:条目移除。
+   * @param pathRaw - 文件路径。
+   * @param content - 已写回的内容。
+   */
+  commitRevertHunk(pathRaw: string, content: string): void {
+    const path = this.io.normalizePath(pathRaw)
+    const file = this.state.files[path]
+    if (file === undefined) return
+    file.lastKnownHash = hashOf(content)
+    const baseline = file.baseline ?? (file.created ? '' : null)
+    if (baseline !== null && content === baseline) {
+      this.state.records = this.state.records.filter(r => r.path !== path)
+      delete this.state.files[path]
+    }
+  }
+
+  /** 「待确认」文件级视图(仅含 pending 文件),按最近改动轮倒序。 */
+  /** 单文件的改动视图(文件预览渲染器用)。 */
+  async changesFor(pathRaw: string): Promise<FileChangesView | undefined> {
+    const path = this.io.normalizePath(pathRaw)
+    const file = this.state.files[path]
+    if (file === undefined) return undefined
+    const facts = await this.io.readFacts(path).catch(() => ({ currentContent: null, currentHash: null }))
+    return changesOf(file, facts)
   }
 
   /** 「待确认」文件级视图(仅含 pending 文件),按最近改动轮倒序。 */

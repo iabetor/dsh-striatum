@@ -6,7 +6,7 @@
  *    sourceEventSeqs 回查 call 补登。
  */
 import { describe, expect, it } from 'vitest'
-import { changesOfResult, diffsOfEvent, mutationPathOf } from '../src/host/capture.ts'
+import { beforeTextOf, changesOfResult, diffsOfEvent, mutationPathOf } from '../src/host/capture.ts'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 
 function toolResultEvent(
@@ -113,12 +113,13 @@ describe('changesOfResult', () => {
     }])
   })
 
-  it('create write (no diffs) falls back to the paired call path', () => {
+  it('create write (no diffs) falls back to the paired call path, flagged as created', () => {
     const call = callEvent(4, 'write', '/w/new.go')
     const result = toolResultEvent(undefined, { seq: 5, callSeq: 4 })
     const changes = changesOfResult(sessionWith([call, result]), result)
+    // created: 显式标注「新建」,供 host 把基线视为空文件(整篇显示为新增)。
     expect(changes).toEqual([{
-      turn: 1, step: 2, seq: 5, path: '/w/new.go', oldText: null, newText: '',
+      turn: 1, step: 2, seq: 5, path: '/w/new.go', oldText: null, newText: '', created: true,
     }])
   })
 
@@ -131,5 +132,65 @@ describe('changesOfResult', () => {
   it('create write with no citable call yields nothing (malformed log)', () => {
     const result = toolResultEvent(undefined, { seq: 5, callSeq: 99 }) // call seq missing
     expect(changesOfResult(sessionWith([result]), result)).toEqual([])
+  })
+
+  describe('changesOfResult with a before provider', () => {
+    it('attaches beforeText so the first change already has a baseline', () => {
+      const call = callEvent(4, 'edit', '/w/a.go')
+      const result = toolResultEvent({
+        diffs: [{ path: '/w/a.go', oldText: 'o', newText: 'n' }],
+      }, { seq: 5, callSeq: 4 })
+      const changes = changesOfResult(sessionWith([call, result]), result, () => 'OLD\n')
+      expect(changes).toEqual([{
+        turn: 1, step: 2, seq: 5, path: '/w/a.go', oldText: 'o', newText: 'n', beforeText: 'OLD\n',
+      }])
+    })
+
+    it('omits beforeText when the provider has nothing (falls back to keep-first)', () => {
+      const call = callEvent(4, 'edit', '/w/a.go')
+      const result = toolResultEvent({
+        diffs: [{ path: '/w/a.go', oldText: 'o', newText: 'n' }],
+      }, { seq: 5, callSeq: 4 })
+      const changes = changesOfResult(sessionWith([call, result]), result, () => undefined)
+      expect(changes[0]).not.toHaveProperty('beforeText')
+    })
+
+    it('shares one beforeText across the hunks of a single file change', () => {
+      const call = callEvent(4, 'edit', '/w/a.go')
+      const result = toolResultEvent({
+        diffs: [
+          { path: '/w/a.go', oldText: 'o1', newText: 'n1' },
+          { path: '/w/a.go', oldText: 'o2', newText: 'n2' },
+        ],
+      }, { seq: 5, callSeq: 4 })
+      const changes = changesOfResult(sessionWith([call, result]), result, () => 'FULL')
+      expect(changes.map(c => c.beforeText)).toEqual(['FULL', 'FULL'])
+    })
+  })
+})
+
+describe('beforeTextOf (tools/execute 包装器的前置内容提取)', () => {
+  it('reads the full pre-write content from a write value', () => {
+    expect(beforeTextOf('write', { path: '/w/a.go', before: 'OLD\n', after: 'NEW\n' })).toBe('OLD\n')
+  })
+
+  it('reads the full pre-edit content from an edit value', () => {
+    expect(beforeTextOf('edit', { path: '/w/a.go', before: 'OLD', after: 'NEW' })).toBe('OLD')
+  })
+
+  it('reports null for a create (before absent)', () => {
+    expect(beforeTextOf('write', { path: '/w/new.go', before: null, after: 'NEW' })).toBeNull()
+  })
+
+  it('ignores tools that do not mutate files', () => {
+    expect(beforeTextOf('bash', { before: 'x' })).toBeUndefined()
+    expect(beforeTextOf('read', { before: 'x' })).toBeUndefined()
+  })
+
+  it('ignores malformed values instead of inventing a baseline', () => {
+    expect(beforeTextOf('write', null)).toBeUndefined()
+    expect(beforeTextOf('write', 'not-an-object')).toBeUndefined()
+    expect(beforeTextOf('write', { path: '/w/a.go' })).toBeUndefined()
+    expect(beforeTextOf('write', { before: 42 })).toBeUndefined()
   })
 })

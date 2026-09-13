@@ -12,6 +12,8 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent, SessionSeq } from '@deepseek-ai/dsh-session'
+import { FsTargetKey } from '@deepseek-ai/dsh-fs'
+import type { FsTarget, FsWriteOutcome } from '@deepseek-ai/dsh-fs'
 import { StriatumService, type StriatumFsFace } from '../src/index.ts'
 import { registerCapture } from '../src/host/capture.ts'
 
@@ -21,15 +23,16 @@ class MockFs implements StriatumFsFace {
   constructor(initial: Record<string, string> = {}) {
     for (const [p, c] of Object.entries(initial)) this.contents.set(p, c)
   }
-  async resolve(path: string): Promise<{ path: string }> { return { path } }
-  async readText(target: { path: string }): Promise<string> {
-    const content = this.contents.get(target.path)
+  async resolve(path: string): Promise<FsTarget> { return { targetKey: FsTargetKey(path), displayPath: path } }
+  async readText(target: FsTarget): Promise<string> {
+    const content = this.contents.get(target.displayPath)
     if (content === undefined) throw new Error('ENOENT')
     return content
   }
-  async writeText(target: { path: string }, content: string): Promise<unknown> {
-    this.contents.set(target.path, content)
-    return {}
+  async writeText(target: FsTarget, content: string): Promise<FsWriteOutcome> {
+    const operation = this.contents.has(target.displayPath) ? 'update' : 'create'
+    this.contents.set(target.displayPath, content)
+    return { operation, version: 'v1', before: null, after: content } as FsWriteOutcome
   }
   agentWrite(path: string, content: string): void { this.contents.set(path, content) }
 }
@@ -171,5 +174,33 @@ describe('registerCapture × StriatumService', () => {
     expect(st.files).toHaveLength(2)
     expect(st.files.find(f => f.path === A)!.changeCount).toBe(1) // 未被重复登记
     expect(st.files.find(f => f.path === '/work/sess-1/new.go')!.changeCount).toBe(1)
+  })
+
+  it('a tools/execute-provided before makes the FIRST change diffable (no keep needed)', async () => {
+    const OLD = 'package a\n\nfunc A() {}\n'
+    const NEW = 'package a\n\nfunc A() { return 1 }\n'
+    const fs2 = new MockFs({ [A]: OLD })
+    const { service } = await makeService(fs2)
+    const ctx = captureCtx()
+    registerCapture(ctx as never, service)
+
+    // 包装器先跑:工具返回值携带改动前全文
+    const agent = { id: 'sess-1' }
+    await (ctx as unknown as {
+      waterfall: (c: unknown, name: string, ...a: unknown[]) => Promise<unknown>
+    }).waterfall(ctx, 'tools/execute', { name: 'edit', callId: 'c-0', agent },
+      async () => ({ isError: false, value: { path: A, before: OLD, after: NEW } }))
+
+    // 然后 tool/result 到达(磁盘已是新内容)
+    fs2.agentWrite(A, NEW)
+    const session = stubSession('sess-1')
+    session.push(callEvent(0, 1, 'edit', A))
+    session.push(resultEvent(1, 1, { diffs: [{ path: A, oldText: 'old', newText: NEW }] }, 0))
+    emitCreated(ctx, session)
+    await waitFiles(service, 'sess-1', 1)
+
+    const view = await service.changes('sess-1', A)
+    expect(view.hasBaseline).toBe(true)
+    expect(view.hunks.length).toBeGreaterThan(0)
   })
 })

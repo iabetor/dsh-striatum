@@ -5,6 +5,7 @@
  * 才显示;折叠为单行卡片(对齐 GoalBar/composer 几何),展开后按文件列出
  * Keep/Undo(文件级语义)。
  */
+import type { TranslateNS } from '@deepseek-ai/dsh-client-locale/client'
 import type { FileStateView } from '../shared/wire.ts'
 import { fetchState, keep, undo, StriatumApiClientError } from './api.ts'
 import { subscribeStriatumEvents } from './events.ts'
@@ -12,8 +13,15 @@ import { useEffect, useState, h, type CSSProperties } from './react.ts'
 
 /** 本组件经槽位注入的能力。 */
 export interface OverviewStripInjected {
-  t: (key: string, params?: Record<string, unknown>) => string
+  t: TranslateNS<'striatum'>
   sessionId: string
+  /**
+   * 打开某文件的预览(点「diff」时调用)。
+   *
+   * 由注册处注入:它拿得到 `ctx.sidebarRight`(reflect.provide 服务)。组件
+   * 自身不直接依赖侧栏服务,以保持与槽位契约解耦。
+   */
+  onOpenDiff?: (path: string) => void
 }
 
 export type OverviewStripProps = OverviewStripInjected
@@ -72,7 +80,7 @@ function basename(path: string): string {
 }
 
 /** OverviewStrip 主体:常驻于输入框上方、与 composer 对齐的卡片。 */
-export function OverviewStripBody({ t, sessionId }: OverviewStripProps) {
+export function OverviewStripBody({ t, sessionId, onOpenDiff }: OverviewStripProps) {
   const [files, setFiles] = useState<FileStateView[]>([])
   const [expanded, setExpanded] = useState(false)
   const [busyPath, setBusyPath] = useState<string | null>(null)
@@ -160,6 +168,14 @@ export function OverviewStripBody({ t, sessionId }: OverviewStripProps) {
               ? h('span', { style: { color: '#b8860b', flex: 'none' } }, t('striatum.conflict'))
               : null,
           h('span', { style: { flex: 1 } }),
+          // 「diff」:打开该文件的预览(注册了改动渲染器的类型会抢先显示 diff)。
+          onOpenDiff !== undefined
+            ? h('button', {
+                type: 'button',
+                onClick: () => { onOpenDiff(f.path) },
+                style: btnStyle,
+              }, t('striatum.viewDiff'))
+            : null,
           h('button', {
             type: 'button', disabled: busyPath !== null, onClick: () => { void onKeep(f.path) },
             style: btnStyle,
