@@ -549,11 +549,11 @@ describe('内容删除(del 行)', () => {
     await withDeletion(fs, r)
     const hunk = (await r.changesFor(A))!.hunks[0]!
     const old = oldSideLines(hunk)
-    for (const row of hunkRows(hunk, hunk.newStart)) {
+    for (const row of hunkRows(hunk)) {
       if (row.kind !== 'del') continue
       expect(old[row.oldIndex!]).toBe(row.text)
     }
-    expect(hunkRows(hunk, hunk.newStart).filter(r2 => r2.kind === 'del').map(r2 => r2.oldIndex)).toEqual([2])
+    expect(hunkRows(hunk).filter(r2 => r2.kind === 'del').map(r2 => r2.oldIndex)).toEqual([2])
   })
 
   it('handles deleting the entire file content (every line removed)', async () => {
@@ -567,7 +567,7 @@ describe('内容删除(del 行)', () => {
     expect(view.hunks[0]!.added).toBe(0)
     // 全部行都是删除行 → 无新侧行号,且旧侧下标 0..4 逐个对齐
     const hunk = view.hunks[0]!
-    const rows = hunkRows(hunk, hunk.newStart)
+    const rows = hunkRows(hunk)
     expect(rows.every(row => row.newLineNo === null)).toBe(true)
     expect(rows.map(row => row.oldIndex)).toEqual([0, 1, 2, 3, 4])
     expect((await r.prepareUndo(A)).content).toBe(FULL)

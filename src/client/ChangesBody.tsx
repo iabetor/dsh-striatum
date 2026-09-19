@@ -24,7 +24,7 @@ import { subscribeStriatumEvents } from './events.ts'
 import { parseFileAddress } from './file-address.ts'
 import { highlightLines, languageForPath, type HighlightedLines } from './highlight.ts'
 import { centerScrollTop, rulerMarks, type RulerMark } from './ruler.ts'
-import { contentLines, hunkRows, oldSideLines, segmentsOf } from './segments.ts'
+import { contentLines, hunkHeaderOf, hunkRows, oldSideLines, segmentsOf, withFoldedPlain } from './segments.ts'
 import { useCallback, useEffect, useMemo, useRef, useState, h, type CSSProperties } from './react.ts'
 
 /** 本命名空间绑定的翻译函数(键集由 locales.ts 的声明约束)。 */
@@ -72,37 +72,92 @@ const rowStyle: CSSProperties = {
   alignItems: 'stretch',
 }
 
-/** 整文件画布:等宽、可换行、行号用 grid 对齐。 */
+/**
+ * 整文件画布:等宽、可换行,行号用 grid 对齐。
+ *
+ * 字体与行高对齐官方 ReviewTab(`--dsw-font-markdown-code-block` = 11px/19px);
+ * 行网格取官方 `.line` 的四栏 `3.5em 3.5em 1.2em minmax(0,1fr)`,底色与标记色
+ * 走同一批 `--dsw-alias-*` token —— 这样本视图与官方对比视图观感一致。纯文件行
+ * (无改动)只填新行号栏,旧行号栏留空,列宽因此不跳动。
+ */
 const canvasStyle: CSSProperties = {
   flex: '1 1 auto',
   minWidth: '0',
   minHeight: '0',
   overflow: 'auto',
-  fontFamily: 'var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace)',
-  fontSize: '11px',
-  lineHeight: '1.55',
+  font: 'var(--dsw-font-markdown-code-block, 11px/19px ui-monospace, SFMono-Regular, Menlo, monospace)',
 }
+
+/** 四栏行网格(旧行号 / 新行号 / 标记 / 正文),与官方 ReviewTab 的 `.line` 同构。 */
+const GRID_COLUMNS = '3.5em 3.5em 1.2em minmax(0, 1fr)'
 
 const gridRowStyle: CSSProperties = {
   display: 'grid',
-  gridTemplateColumns: '3.2em 1fr',
+  gridTemplateColumns: GRID_COLUMNS,
+  minHeight: '22px',
+  lineHeight: '22px',
   whiteSpace: 'pre-wrap',
   wordBreak: 'break-word',
 }
 
+/** 行号栏(旧/新共用):右对齐、不可选中、三级文案色 —— 与官方 `.number` 一致。 */
 const gutterStyle: CSSProperties = {
   textAlign: 'right',
-  paddingRight: '6px',
-  opacity: 0.4,
+  paddingRight: '8px',
+  color: 'var(--dsw-alias-label-tertiary)',
   userSelect: 'none',
   fontVariantNumeric: 'tabular-nums',
 }
 
-const bodyCellStyle: CSSProperties = { paddingRight: '6px' }
+/** 标记栏(`+`/`-`/空格),与官方 `.sign` 一致居中。 */
+const signStyle: CSSProperties = {
+  textAlign: 'center',
+  userSelect: 'none',
+}
 
-const ctxRowStyle: CSSProperties = { ...gridRowStyle, opacity: 0.75 }
-const delRowStyle: CSSProperties = { ...gridRowStyle, background: '#c0392b1f' }
-const addRowStyle: CSSProperties = { ...gridRowStyle, background: '#27ae601f' }
+const bodyCellStyle: CSSProperties = { paddingRight: '16px' }
+
+/**
+ * 改动行底色:与官方 ReviewTab 同一套 `color-mix`,不再写死 `#c0392b1f` ——
+ * 写死色在浅色主题下会脏,与官方并排时肉眼可辨。
+ */
+const ctxRowStyle: CSSProperties = { ...gridRowStyle }
+const delRowStyle: CSSProperties = {
+  ...gridRowStyle,
+  background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)',
+}
+const addRowStyle: CSSProperties = {
+  ...gridRowStyle,
+  background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent)',
+}
+const delTextStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
+const addTextStyle: CSSProperties = { color: 'var(--dsw-alias-state-success-primary)' }
+const ctxTextStyle: CSSProperties = { color: 'var(--dsw-alias-label-secondary)' }
+
+/** hunk 头:`@@ -a,b +c,d @@`,等宽、三级文案色 —— 与官方 `.hunkHeader` 一致。 */
+const hunkHeaderStyle: CSSProperties = {
+  padding: '4px 16px',
+  color: 'var(--dsw-alias-label-tertiary)',
+  whiteSpace: 'pre',
+  fontVariantNumeric: 'tabular-nums',
+}
+
+/** 折叠标记:一行高的可点条,样式与 hunk 头同族但可交互。 */
+const foldStyle: CSSProperties = {
+  display: 'block',
+  boxSizing: 'border-box',
+  width: '100%',
+  margin: 0,
+  padding: '2px 16px',
+  border: 0,
+  borderTop: '0.5px solid var(--dsw-alias-border-l1)',
+  borderBottom: '0.5px solid var(--dsw-alias-border-l1)',
+  background: 'transparent',
+  color: 'var(--dsw-alias-label-tertiary)',
+  font: 'inherit',
+  textAlign: 'left',
+  cursor: 'pointer',
+}
 
 /** 改动区末尾的操作条:紧跟改动行,标明作用范围就是这一块。 */
 const opsRowStyle: CSSProperties = {
@@ -164,10 +219,19 @@ const dangerStyle: CSSProperties = { ...btnStyle, borderColor: '#c0392b66', colo
 const statStyle: CSSProperties = { opacity: 0.6, fontVariantNumeric: 'tabular-nums' }
 const spacerStyle: CSSProperties = { flex: '1 1 auto' }
 
-/** 渲染一行的高亮片段;无高亮数据时退回纯文本。 */
-function LineBody({ text, spans }: { text: string, spans: readonly { text: string, color: string | undefined }[] | undefined }) {
-  if (spans === undefined) return h('span', { key: 't', style: bodyCellStyle }, text)
-  return h('span', { key: 't', style: bodyCellStyle },
+/**
+ * 渲染一行的高亮片段;无高亮数据时退回纯文本。
+ *
+ * `style` 是该行的正文色(新增/删除/上下文),高亮 span 自带颜色时优先于它。
+ */
+function LineBody({ text, spans, style }: {
+  text: string
+  spans: readonly { text: string, color: string | undefined }[] | undefined
+  style?: CSSProperties | undefined
+}) {
+  const base = { ...bodyCellStyle, ...style }
+  if (spans === undefined) return h('span', { key: 't', style: base }, text)
+  return h('span', { key: 't', style: base },
     spans.map((span, i) => h('span', { key: i, style: span.color === undefined ? undefined : { color: span.color } }, span.text)))
 }
 
@@ -186,12 +250,19 @@ function highlightOldSide(hunk: HunkView, lang: string | undefined): Highlighted
   return highlightLines(oldLines.join('\n'), lang)
 }
 
-/** 渲染一个改动区:删除行(红)+ 上下文 + 新增行(绿)+ 操作条。 */
+/**
+ * 渲染一个改动区:官方 ReviewTab 的观感(双侧行号 + `@@` 头 + 底色行),
+ * 外加 striatum 的 hunk 级操作条。
+ *
+ * 与官方的一处**必要差异**:官方每行只有一栏正文,行号是「旧|新」两栏;我们
+ * 同样两栏,但正文前多一个标记栏 —— 因为官方正文里带着 `+`/`-` 前缀(来自
+ * hunk.lines 的首字符),而我们这一层已经把它剥进 `marker`,再拼回字符串会与
+ * 语法高亮的 span 下标打架。多一栏比重新对齐高亮下标更稳。
+ */
 function HunkRegion({
-  hunk, startLine, t, busy, onAccept, onRevert, regionRef, allHighlight, oldHighlight,
+  hunk, t, busy, onAccept, onRevert, regionRef, allHighlight, oldHighlight,
 }: {
   hunk: HunkView
-  startLine: number
   t: T
   busy: boolean
   onAccept: () => void
@@ -203,17 +274,26 @@ function HunkRegion({
   oldHighlight: HighlightedLines | undefined
 }) {
   const rows: ReturnType<typeof h>[] = []
-  hunkRows(hunk, startLine).forEach((row, i) => {
+  // 官方那种 hunk 头:让"这一块在文件的哪个位置"一眼可读,也是与官方观感
+  // 最明显的一处对齐。
+  rows.push(h('div', { key: 'head', style: hunkHeaderStyle }, hunkHeaderOf(hunk)))
+  hunkRows(hunk).forEach((row, i) => {
     const isDel = row.kind === 'del'
-    const style = isDel ? delRowStyle : row.kind === 'add' ? addRowStyle : ctxRowStyle
+    const isAdd = row.kind === 'add'
+    const style = isDel ? delRowStyle : isAdd ? addRowStyle : ctxRowStyle
+    // 正文色:新增/删除用状态色,上下文用二级文案色 —— 与官方 `.add .text` /
+    // `.del .text` / `.context .text` 一致。高亮 span 自带颜色时优先。
+    const textStyle = isDel ? delTextStyle : isAdd ? addTextStyle : ctxTextStyle
     // 删除行取旧侧片段,其余行取整文件高亮(下标由 hunkRows 统一算好)。
     const lineNo = row.newLineNo
     const spans = row.oldIndex !== null
       ? oldHighlight?.[row.oldIndex]
       : lineNo === null ? undefined : allHighlight?.[lineNo - 1]
     rows.push(h('div', { key: `l${i}`, style }, [
-      h('span', { key: 'n', style: gutterStyle }, lineNo === null ? '' : String(lineNo)),
-      h(LineBody, { key: 't', text: `${row.marker} ${row.text}`, spans: spans === undefined ? undefined : [{ text: `${row.marker} `, color: undefined }, ...spans] }),
+      h('span', { key: 'on', style: gutterStyle }, row.oldLineNo === null ? '' : String(row.oldLineNo)),
+      h('span', { key: 'nn', style: gutterStyle }, lineNo === null ? '' : String(lineNo)),
+      h('span', { key: 'sg', style: { ...signStyle, ...textStyle } }, row.marker),
+      h(LineBody, { key: 't', text: row.text, style: textStyle, spans }),
     ]))
   })
   rows.push(h('div', { key: 'ops', style: opsRowStyle }, [
@@ -261,12 +341,14 @@ function PlainCanvas({
   /** 当前文件全文的逐行高亮;undefined 时退化为纯文本。 */
   allHighlight: HighlightedLines | undefined
 }) {
+  // 与有改动时同一套四栏网格:旧行号栏留空、无标记 —— 这样从"纯查看"切到
+  // "有改动"时列宽不跳。
   return h('div', { style: canvasStyle, ref: scrollportRef },
     lines.map((text, i) => h('div', { key: i, style: gridRowStyle }, [
-      h('span', { key: 'n', style: gutterStyle }, String(i + 1)),
-      h(LineBody, { key: 't', text: `  ${text}`, spans: allHighlight?.[i] === undefined
-        ? undefined
-        : [{ text: '  ', color: undefined }, ...allHighlight[i]] }),
+      h('span', { key: 'on', style: gutterStyle }, ''),
+      h('span', { key: 'nn', style: gutterStyle }, String(i + 1)),
+      h('span', { key: 'sg', style: signStyle }, ' '),
+      h(LineBody, { key: 't', text, style: ctxTextStyle, spans: allHighlight?.[i] }),
     ])))
 }
 
@@ -341,6 +423,12 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
   // 只在正文读全(eof)后才叠加改动:分页加载中途行号会变,叠加必然错位。
   const overlay = complete ? (view?.hunks ?? []) : []
   const segments = useMemo(() => segmentsOf(lines, overlay), [lines, overlay])
+  // 已展开的普通段起点。折叠只作用于**离改动很远的空白长段**,改动块相邻的
+  // 上下文永远可见;万行文件因此不会把整份正文塞进 DOM。
+  const [unfolded, setUnfolded] = useState<ReadonlySet<number>>(() => new Set())
+  // 换文件时清空展开状态,否则段起点会张冠李戴。
+  useEffect(() => { setUnfolded(new Set()) }, [parsed?.sessionId, parsed?.path])
+  const items = useMemo(() => withFoldedPlain(segments, unfolded), [segments, unfolded])
   const marks = useMemo(() => rulerMarks(lines.length, overlay), [lines.length, overlay])
   // 每个改动块的旧侧高亮(删除行专用):键为块索引。旧侧片段很小,单独着色成本可忽略。
   const oldHighlights = useMemo(
@@ -395,28 +483,39 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
   return h('div', { style: wrapStyle }, [
     h('div', { key: 'row', style: rowStyle }, [
       h('div', { key: 'canvas', style: canvasStyle, ref: bindCanvas },
-        segments.map((seg, i) => seg.kind === 'plain'
-          ? h('div', { key: `p${i}` }, seg.lines.map((line, j) => {
-              const spans = allHighlight?.[seg.from + j]
+        items.map((item, i) => item.kind === 'plain'
+          ? h('div', { key: `p${i}` }, item.lines.map((line, j) => {
+              const spans = allHighlight?.[item.from + j]
               return h('div', { key: j, style: gridRowStyle }, [
-                h('span', { key: 'n', style: gutterStyle }, String(seg.from + j + 1)),
-                h(LineBody, { key: 't', text: `  ${line}`, spans: spans === undefined
-                  ? undefined
-                  : [{ text: '  ', color: undefined }, ...spans] }),
+                h('span', { key: 'on', style: gutterStyle }, ''),
+                h('span', { key: 'nn', style: gutterStyle }, String(item.from + j + 1)),
+                h('span', { key: 'sg', style: signStyle }, ' '),
+                h(LineBody, { key: 't', text: line, style: ctxTextStyle, spans }),
               ])
             }))
-          : h(HunkRegion, {
-              key: `h${seg.hunk.index}`,
-              hunk: seg.hunk,
-              startLine: seg.hunk.newStart,
-              t,
-              busy,
-              regionRef: registerRegion(seg.hunk.index),
-              allHighlight,
-              oldHighlight: oldHighlights.get(seg.hunk.index),
-              onAccept: () => { void run(() => acceptHunk(parsed!.sessionId, parsed!.path, seg.hunk.index)) },
-              onRevert: () => { void run(() => revertHunk(parsed!.sessionId, parsed!.path, seg.hunk.index)) },
-            }))),
+          : item.kind === 'fold'
+            // 折叠标记占一行,行号栏空着 —— 它不是一个真实行。
+            ? h('button', {
+                key: `f${i}`,
+                type: 'button',
+                'data-striatum-fold': '',
+                style: foldStyle,
+                title: t('striatum.unfoldHint', { count: String(item.hidden) }),
+                onClick: () => {
+                  setUnfolded(prev => new Set([...prev, item.segmentFrom]))
+                },
+              }, t('striatum.folded', { count: String(item.hidden) }))
+            : h(HunkRegion, {
+                key: `h${item.hunk.index}`,
+                hunk: item.hunk,
+                t,
+                busy,
+                regionRef: registerRegion(item.hunk.index),
+                allHighlight,
+                oldHighlight: oldHighlights.get(item.hunk.index),
+                onAccept: () => { void run(() => acceptHunk(parsed!.sessionId, parsed!.path, item.hunk.index)) },
+                onRevert: () => { void run(() => revertHunk(parsed!.sessionId, parsed!.path, item.hunk.index)) },
+              }))),
       h(Ruler, { key: 'ruler', marks, onJump: jumpTo, t }),
     ]),
     view?.diffLimited === true ? h('div', { key: 'big', style: noticeStyle }, t('striatum.diffLimited')) : null,

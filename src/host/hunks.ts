@@ -19,8 +19,12 @@ export const HUNK_CONTEXT = 3
 export interface Hunk {
   /** 稳定索引(在本次计算里),客户端用它指代"这一块"。 */
   index: number
+  /** 该块在**基线(旧)侧**的起始行号(1-based);纯插入时 `oldLines` 为 0,`oldStart` 仍为 1。 */
+  oldStart: number
+  /** 该块在基线侧覆盖的行数(含上下文);纯插入为 0。 */
+  oldLines: number
   /**
-   * 该块在当前文件(new 侧)中的起始行号(1-based)。
+   * 该块在**当前文件**(new 侧)中的起始行号(1-based)。
    *
    * 客户端据此把改动行**叠加到整文件渲染**上:接受一块后,该段高亮消失但
    * 文件内容仍在原处可见,不会出现"点一下内容就没了"的空洞。
@@ -84,7 +88,18 @@ export function hunksOf(baseline: string, current: string): Hunk[] {
         lines.push({ kind: 'context', text })
       }
     }
-    return { index, newStart: hunk.newStart, newLines: hunk.newLines, lines, added, removed }
+    // oldStart/oldLines 与 newStart/newLines 一起交给客户端画双侧行号栏
+    // (官方 ReviewTab 的观感);定位与叠加仍只用 new 侧。
+    return {
+      index,
+      oldStart: hunk.oldStart,
+      oldLines: hunk.oldLines,
+      newStart: hunk.newStart,
+      newLines: hunk.newLines,
+      lines,
+      added,
+      removed,
+    }
   })
 }
 

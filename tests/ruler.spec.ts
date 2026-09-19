@@ -9,7 +9,7 @@ import { MIN_MARK_PERCENT, centerScrollTop, rulerMarks } from '../src/client/rul
 
 /** 造一个只关心定位字段的 hunk。 */
 function hunk(index: number, newStart: number, added = 1, removed = 1): HunkView {
-  return { index, newStart, newLines: added + 3, lines: [], added, removed }
+  return { index, oldStart: newStart, oldLines: removed + 3, newStart, newLines: added + 3, lines: [], added, removed }
 }
 
 describe('rulerMarks', () => {

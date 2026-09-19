@@ -29,6 +29,17 @@ export interface FileStateView {
 export interface HunkView {
   /** 在本次计算里的稳定索引;客户端用它指代"这一块"。 */
   index: number
+  /**
+   * 该块在**基线(旧)侧**的起始行号(1-based)。
+   *
+   * 与 {@link newStart} 一起画成官方那种双侧行号栏,并拼出
+   * `@@ -oldStart,oldLines +newStart,newLines @@` 头。纯插入(基线里没有对应
+   * 行)时 `oldLines` 为 0,而 `oldStart` 仍是 **1** —— 这是 `diff` 库的实际
+   * 行为(实测:`''`→`'x\ny\n'` 得 `-1,0`),不是 git 那种新建文件的 `-0,0`。
+   */
+  oldStart: number
+  /** 该块在基线侧覆盖的行数(含上下文);纯插入为 0。 */
+  oldLines: number
   /** 该块在**当前文件**中的起始行号(1-based),供整文件叠加渲染定位。 */
   newStart: number
   /** 该块在当前文件中覆盖的行数(含上下文)。 */

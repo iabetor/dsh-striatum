@@ -46,6 +46,8 @@ export const zh = {
   'striatum.rulerMark': '第 {line} 行 · +{added} -{removed}',
   'striatum.rulerJump': '跳到第 {line} 行的改动',
   'striatum.diffLimited': '文件过大,已跳过改动对比(仍可查看全文)。',
+  'striatum.folded': '⋯ 已折叠 {count} 行未改动内容,点击展开',
+  'striatum.unfoldHint': '展开这 {count} 行未改动内容',
   'striatum.fileLevel': '整个文件',
   'striatum.keepAllFile': 'Keep 整个文件',
 }
@@ -82,6 +84,8 @@ export const en: Record<StriatumKey, string> = {
   'striatum.rulerMark': 'Line {line} · +{added} -{removed}',
   'striatum.rulerJump': 'Jump to the change at line {line}',
   'striatum.diffLimited': 'File too large; change comparison skipped (full text still shown).',
+  'striatum.folded': '⋯ {count} unchanged lines folded; click to expand',
+  'striatum.unfoldHint': 'Expand these {count} unchanged lines',
   'striatum.fileLevel': 'Whole file',
   'striatum.keepAllFile': 'Keep whole file',
 }

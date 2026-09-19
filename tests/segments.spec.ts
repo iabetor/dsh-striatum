@@ -6,11 +6,11 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { HunkView } from '../src/shared/wire.ts'
-import { contentLines, segmentsOf } from '../src/client/segments.ts'
+import { contentLines, PLAIN_FOLD_KEEP, segmentsOf, withFoldedPlain } from '../src/client/segments.ts'
 
 /** 造一个只用于定位的 hunk(内容字段对编排无影响)。 */
 function hunk(index: number, newStart: number, newLines: number): HunkView {
-  return { index, newStart, newLines, lines: [], added: 1, removed: 1 }
+  return { index, oldStart: newStart, oldLines: newLines, newStart, newLines, lines: [], added: 1, removed: 1 }
 }
 
 /** 把片段还原成「画布上实际占用的行数」,用于核对不丢行。 */
@@ -95,5 +95,56 @@ describe('segmentsOf', () => {
     expect(segs).toHaveLength(1)
     expect(segs[0]!.kind).toBe('hunk')
     expect(coveredLines(lines, segs)).toEqual(lines)
+  })
+})
+
+/**
+ * 折叠是**给 DOM 行数封顶**的手段:本视图画整份文件,万行文件全量进 DOM 会拖垮
+ * 渲染。这里锁三件事:短段不动、长段只折叠中段(改动相邻的上下文永远可见)、
+ * 展开后能还原成原样。
+ */
+describe('withFoldedPlain', () => {
+  const big = Array.from({ length: 500 }, (_, i) => `line ${i + 1}`)
+
+  it('leaves a short segment untouched', () => {
+    const segs = segmentsOf(big.slice(0, 50), [])
+    const items = withFoldedPlain(segs, new Set())
+    expect(items.map(i => i.kind)).toEqual(['plain'])
+    expect((items[0] as { lines: string[] }).lines).toHaveLength(50)
+  })
+
+  it('folds a long segment into head, marker, and tail', () => {
+    const segs = segmentsOf(big, [])
+    const items = withFoldedPlain(segs, new Set())
+    expect(items.map(i => i.kind)).toEqual(['plain', 'fold', 'plain'])
+    const head = items[0] as Extract<typeof items[number], { kind: 'plain' }>
+    const fold = items[1] as Extract<typeof items[number], { kind: 'fold' }>
+    const tail = items[2] as Extract<typeof items[number], { kind: 'plain' }>
+    expect(head.lines).toHaveLength(PLAIN_FOLD_KEEP)
+    expect(tail.lines).toHaveLength(PLAIN_FOLD_KEEP)
+    // 折叠掉的是中段,首尾之和 + 折叠数 = 原文行数(不丢不重)
+    expect(head.lines.length + fold.hidden + tail.lines.length).toBe(big.length)
+    // 段起点供展开时回写,不是缺口起点
+    expect(fold.segmentFrom).toBe(0)
+    // 尾部行号连续接上缺口之后
+    expect(tail.lines[0]).toBe(`line ${big.length - PLAIN_FOLD_KEEP + 1}`)
+  })
+
+  it('restores the segment exactly when its start is in the expanded set', () => {
+    const segs = segmentsOf(big, [])
+    const items = withFoldedPlain(segs, new Set([0]))
+    expect(items.map(i => i.kind)).toEqual(['plain'])
+    expect((items[0] as Extract<typeof items[number], { kind: 'plain' }>).lines).toEqual(big)
+  })
+
+  it('keeps hunk-adjacent context visible by folding only the far segments', () => {
+    // 改动在第 250 行:前后两段各 ~247 行,都超阈值 → 各自折叠,改动本身不受影响
+    const segs = segmentsOf(big, [hunk(0, 250, 1)])
+    const items = withFoldedPlain(segs, new Set())
+    expect(items.map(i => i.kind)).toEqual(['plain', 'fold', 'plain', 'hunk', 'plain', 'fold', 'plain'])
+    expect(items.filter(i => i.kind === 'hunk')).toHaveLength(1)
+    // 折叠后总渲染行数远小于原文
+    const rendered = items.reduce((n, i) => n + (i.kind === 'plain' ? i.lines.length : i.kind === 'fold' ? 1 : 0), 0)
+    expect(rendered).toBeLessThan(big.length / 2)
   })
 })
