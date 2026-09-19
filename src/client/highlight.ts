@@ -166,16 +166,81 @@ export function languageForPath(path: string): string | undefined {
 }
 
 /**
+ * 超过这个字节数就不着色。
+ *
+ * 着色成本随字节数近似线性增长 —— 但**仅当行长正常**。预热后实测(约 40 字符
+ * 行长):34KB≈49ms、109KB≈127ms、257KB≈295ms、563KB≈652ms、1.1MB≈1310ms。
+ * 取 256KB 是与 host 侧 `DIFF_TEXT_MAX` **同一个边界**:那份文本既然已被判定为
+ * "太大不做逐行对比",也就不该再花 300ms 去着色;两边同数,省得日后解释为什么
+ * 是两个阈值。
+ *
+ * 但这只是**第一道**卡口 —— 它防不住超长行,见 {@link HIGHLIGHT_MAX_LINE_WORK}。
+ */
+export const HIGHLIGHT_MAX_BYTES = 256 * 1024
+
+/**
+ * 着色开销的代理值上限:Σ(行长的平方)。超过就不着色。
+ *
+ * 为什么字节上限不够:实测**总字节固定为 200KB** 时,只把行长从 36 拉到 1000,
+ * 耗时就从 286ms 涨到 5004ms —— 17 倍。原因是引擎逐行做正则/TextMate 匹配,
+ * **单行成本随行长近似平方增长**(实测单行 1000 字符 26ms、2000 字符 103ms、
+ * 3000 字符 225ms,正是 4×/2.25× 的平方关系)。所以总成本 ≈ Σ Lᵢ²,而字节数
+ * 对此完全无感:一行 50000 字符的 minified 产物只有 50KB,却要 **65 秒**。
+ *
+ * 阈值 12e6 由实测标定(每 1e6 代理值约 40ms):
+ *  - **真实源码远在阈下**(实测本仓库最大文件 `ChangesBody.tsx` 仅 1.1M);
+ *    40 字符/行的正常代码即使打满 256KB 字节上限也只有 10.7M → 仍全额着色;
+ *  - 阈值内的最坏耗时实测 **约 490ms**(在 82 字符 × 2974 行处取得);
+ *  - 超过即退回纯文本 —— 对超长行文件来说,这是从"卡死 65 秒"变成"没有颜色",
+ *    而正文、改动块、折叠都照常。
+ *
+ * 取 12e6 而非更宽松的 20e6:后者阈值内最坏约 710ms,而同步阻塞主线程半秒以上
+ * 已属可感卡顿,且换来的只是"某些 256KB 级、行长 60~80 的文件也能着色"。
+ * 宁可在这类边缘大文件上不着色。
+ */
+export const HIGHLIGHT_MAX_LINE_WORK = 12_000_000
+
+/**
+ * 着色开销代理值 Σ L²。
+ *
+ * 独立成导出函数是为了可测:阈值标定依赖它,单测要能直接验证公式本身,
+ * 而不是只能通过"跑一次着色看快不快"这种不稳定手段。
+ * @param code - 源码全文。
+ * @returns Σ(行长²);空文本为 0。
+ */
+export function highlightLineWork(code: string): number {
+  let work = 0
+  let start = 0
+  while (start <= code.length) {
+    const nl = code.indexOf('\n', start)
+    const end = nl === -1 ? code.length : nl
+    const length = end - start
+    work += length * length
+    // 超限即可提前返回:继续累加对结论无影响,还白扫剩余文本。
+    if (work > HIGHLIGHT_MAX_LINE_WORK) return work
+    if (nl === -1) break
+    start = nl + 1
+  }
+  return work
+}
+
+/**
  * 逐行语法高亮。
  *
  * 整份文本**一次**着色再按行切分 —— 多行字符串、块注释、模板字面量等的颜色
  * 依赖跨行状态,逐片段高亮会算错(官方 ReadBlock 的同一条注释)。
+ *
+ * 两道卡口都收在这里(调用方无需各自判断):总量超 {@link HIGHLIGHT_MAX_BYTES}、
+ * 或行长开销超 {@link HIGHLIGHT_MAX_LINE_WORK},都直接返回 undefined 让调用方
+ * 退回纯文本。二者缺一不可 —— 见各自注释里的实测数据。
  * @param code - 源码全文。
  * @param lang - grammar id(来自 {@link languageForPath})。
- * @returns 每行的片段序列;语言未知或着色失败时返回 undefined(调用方退回纯文本)。
+ * @returns 每行的片段序列;语言未知、内容过大/超长行或着色失败时返回 undefined(退回纯文本)。
  */
 export function highlightLines(code: string, lang: string | undefined): HighlightedLines | undefined {
   if (lang === undefined || code === '') return undefined
+  if (code.length > HIGHLIGHT_MAX_BYTES) return undefined
+  if (highlightLineWork(code) > HIGHLIGHT_MAX_LINE_WORK) return undefined
   let tokens
   try {
     ({ tokens } = highlighter().codeToTokens(code, { lang, theme: 'css-variables' }))

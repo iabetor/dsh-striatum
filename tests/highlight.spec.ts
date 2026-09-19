@@ -6,7 +6,9 @@
  * 共用同一批 token,是"两处观感一致"的前提。
  */
 import { describe, expect, it } from 'vitest'
-import { highlightLines, languageForPath } from '../src/client/highlight.ts'
+import {
+  highlightLineWork, highlightLines, HIGHLIGHT_MAX_BYTES, HIGHLIGHT_MAX_LINE_WORK, languageForPath,
+} from '../src/client/highlight.ts'
 import { contentLines } from '../src/client/segments.ts'
 
 describe('languageForPath', () => {
@@ -114,5 +116,65 @@ describe('highlightLines', () => {
     expect(lines).toHaveLength(5)
     const commentColors = [1, 2].map(i => lines![i]!.map(s => s.color).join('|'))
     expect(commentColors[0]).toBe(commentColors[1])
+  })
+
+  /**
+   * 第一道卡口:总字节。着色是**主线程同步**的,耗时随字节数近似线性增长
+   * (预热后实测 257KB≈295ms、1.1MB≈1310ms)。没有它,打开几万行的文件就是
+   * 一两秒白屏。
+   */
+  it('skips highlighting once the text exceeds the byte cap', () => {
+    const big = 'const x = 1\n'.repeat(Math.ceil(HIGHLIGHT_MAX_BYTES / 12) + 1)
+    expect(big.length).toBeGreaterThan(HIGHLIGHT_MAX_BYTES)
+    expect(highlightLines(big, 'typescript')).toBeUndefined()
+  })
+
+  it('highlights normal source right up to the byte cap', () => {
+    // 卡口是 `>`,恰好等于上限仍着色 —— 且正常源码在 256KB 处远未触及第二道。
+    const unit = 'const value = compute(1, "x");\n'
+    const code = unit.repeat(Math.floor(HIGHLIGHT_MAX_BYTES / unit.length))
+    expect(code.length).toBeLessThanOrEqual(HIGHLIGHT_MAX_BYTES)
+    expect(highlightLineWork(code)).toBeLessThan(HIGHLIGHT_MAX_LINE_WORK)
+    expect(highlightLines(code, 'typescript')).toBeDefined()
+  })
+})
+
+/**
+ * 第二道卡口:行长开销。这是**字节上限挡不住**的那一类 —— 实测总字节固定
+ * 200KB,只把行长从 36 拉到 1000,耗时就从 286ms 涨到 5004ms;单行 50000 字符
+ * 的 minified 产物只有 50KB,却要 65 秒。根因是引擎逐行匹配,单行成本随行长
+ * 近似平方增长。
+ */
+describe('highlightLineWork', () => {
+  it('sums the square of every line length', () => {
+    // 3 行 × 10 字符 → 300;公式本身要能被直接验证,而不是只能靠"跑着色快不快"。
+    expect(highlightLineWork('0123456789\n0123456789\n0123456789')).toBe(300)
+  })
+
+  it('counts a trailing line without a newline', () => {
+    expect(highlightLineWork('abc')).toBe(9)
+    expect(highlightLineWork('abc\nde')).toBe(13)
+  })
+
+  it('is zero for empty text', () => {
+    expect(highlightLineWork('')).toBe(0)
+  })
+
+  it('short-circuits once past the cap instead of scanning the rest', () => {
+    // 提前返回:结论不变(仍超限),但省下扫描剩余文本。
+    const huge = 'x'.repeat(50000) + '\n' + 'y'.repeat(50000)
+    expect(highlightLineWork(huge)).toBeGreaterThan(HIGHLIGHT_MAX_LINE_WORK)
+  })
+
+  it('rejects the pathological single-line inputs that used to hang', () => {
+    for (const code of ['x'.repeat(20000), 'x'.repeat(50000)]) {
+      expect(highlightLineWork(code)).toBeGreaterThan(HIGHLIGHT_MAX_LINE_WORK)
+      expect(highlightLines(code, 'typescript')).toBeUndefined()
+    }
+  })
+
+  it('still accepts deeply ordinary files', () => {
+    // 回归:真实源码必须全部通过 —— 本仓库最大的文件也只有约 1.1M。
+    expect(highlightLineWork('const x = 1\n'.repeat(8000))).toBeLessThan(HIGHLIGHT_MAX_LINE_WORK)
   })
 })
