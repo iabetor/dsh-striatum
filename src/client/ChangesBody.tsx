@@ -24,7 +24,7 @@ import { subscribeStriatumEvents } from './events.ts'
 import { parseFileAddress } from './file-address.ts'
 import { highlightLines, languageForPath, type HighlightedLines } from './highlight.ts'
 import { centerScrollTop, rulerMarks, type RulerMark } from './ruler.ts'
-import { contentLines, hunkHeaderOf, hunkRows, oldSideLines, segmentsOf, withFoldedPlain } from './segments.ts'
+import { contentLines, hunkHeaderOf, hunkRows, oldSideLines, segmentsOf, withFoldedPlain, type RenderItem } from './segments.ts'
 import { useCallback, useEffect, useMemo, useRef, useState, h, type CSSProperties } from './react.ts'
 
 /** 本命名空间绑定的翻译函数(键集由 locales.ts 的声明约束)。 */
@@ -332,24 +332,72 @@ function Ruler({ marks, onJump, t }: { marks: readonly RulerMark[], onJump: (ind
     })))
 }
 
-/** 只读文件画布(无改动叠加时用),与有改动时同一套行渲染。 */
-function PlainCanvas({
-  lines, scrollportRef, allHighlight,
+/**
+ * 折叠标记行:一行高的可点条,点击展开该普通段。
+ *
+ * 抽成独立组件是因为「有改动」与「只读」两条分支都要用它 —— 两处各写一份必然
+ * 漂移(改了一处的文案或 data 属性,另一处忘改)。
+ */
+function FoldRow({
+  hidden, segmentFrom, folded, onUnfold, t,
 }: {
-  lines: readonly string[]
+  hidden: number
+  segmentFrom: number
+  /** 该段当前是否处于折叠态(由调用方按 state 判定,不从 hidden 反推)。 */
+  folded: boolean
+  onUnfold: (segmentFrom: number) => void
+  t: T
+}) {
+  return h('button', {
+    type: 'button',
+    'data-striatum-fold': folded ? '' : undefined,
+    style: foldStyle,
+    title: t('striatum.unfoldHint', { count: String(hidden) }),
+    onClick: () => { onUnfold(segmentFrom) },
+  }, t('striatum.folded', { count: String(hidden) }))
+}
+
+/**
+ * 画布:把 {@link RenderItem} 序列画成四栏行。
+ *
+ * **两条分支共用这一个组件**(有改动 / 只读),差别只在传进来的 `items` 与
+ * `renderHunk`:
+ *  - 普通行、折叠标记的渲染只有一份 —— 早先两条分支各写一份,折叠就只在
+ *    "有改动"那侧生效,只读侧(大文件最常见的路径)整份文件直接进 DOM;
+ *  - `renderHunk` 由调用方给:只读分支不传(它的 items 里不会有 hunk 项)。
+ */
+function Canvas({
+  items, scrollportRef, allHighlight, unfolded, onUnfold, t, renderHunk,
+}: {
+  items: readonly RenderItem[]
   scrollportRef?: (el: HTMLElement | null) => void
   /** 当前文件全文的逐行高亮;undefined 时退化为纯文本。 */
   allHighlight: HighlightedLines | undefined
+  unfolded: ReadonlySet<number>
+  onUnfold: (segmentFrom: number) => void
+  t: T
+  /** 改动块的渲染器;只读分支省略。 */
+  renderHunk?: ((hunk: HunkView) => ReturnType<typeof h>) | undefined
 }) {
-  // 与有改动时同一套四栏网格:旧行号栏留空、无标记 —— 这样从"纯查看"切到
-  // "有改动"时列宽不跳。
   return h('div', { style: canvasStyle, ref: scrollportRef },
-    lines.map((text, i) => h('div', { key: i, style: gridRowStyle }, [
-      h('span', { key: 'on', style: gutterStyle }, ''),
-      h('span', { key: 'nn', style: gutterStyle }, String(i + 1)),
-      h('span', { key: 'sg', style: signStyle }, ' '),
-      h(LineBody, { key: 't', text, style: ctxTextStyle, spans: allHighlight?.[i] }),
-    ])))
+    items.map((item, i) => item.kind === 'plain'
+      // 四栏网格:旧行号栏留空、无标记 —— 纯文件行与改动行共用列宽,从"纯查看"
+      // 切到"有改动"时列不会跳。
+      ? h('div', { key: `p${i}` }, item.lines.map((text, j) => h('div', { key: j, style: gridRowStyle }, [
+          h('span', { key: 'on', style: gutterStyle }, ''),
+          h('span', { key: 'nn', style: gutterStyle }, String(item.from + j + 1)),
+          h('span', { key: 'sg', style: signStyle }, ' '),
+          h(LineBody, { key: 't', text, style: ctxTextStyle, spans: allHighlight?.[item.from + j] }),
+        ])))
+      : item.kind === 'fold'
+        // 折叠标记占一行,行号栏空着 —— 它不是一个真实行。
+        ? h(FoldRow, {
+            key: `f${i}`, hidden: item.hidden, segmentFrom: item.segmentFrom,
+            folded: !unfolded.has(item.segmentFrom), onUnfold, t,
+          })
+        // renderHunk 返回的元素自带 key(HunkRegion 以 `hunk-${index}` 为 key),
+        // 这里直接交给 map 的 key 位置,无需再包一层 Fragment。
+        : renderHunk === undefined ? null : renderHunk(item.hunk)))
 }
 
 /**
@@ -428,7 +476,15 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
   const [unfolded, setUnfolded] = useState<ReadonlySet<number>>(() => new Set())
   // 换文件时清空展开状态,否则段起点会张冠李戴。
   useEffect(() => { setUnfolded(new Set()) }, [parsed?.sessionId, parsed?.path])
+  const unfold = useCallback((segmentFrom: number) => {
+    setUnfolded(prev => new Set([...prev, segmentFrom]))
+  }, [])
   const items = useMemo(() => withFoldedPlain(segments, unfolded), [segments, unfolded])
+  // 只读分支的折叠输入:同一套折叠,但输入是没有 hunk 的单个普通段。
+  const plainItems = useMemo(
+    () => withFoldedPlain(segmentsOf(lines, []), unfolded),
+    [lines, unfolded],
+  )
   const marks = useMemo(() => rulerMarks(lines.length, overlay), [lines.length, overlay])
   // 每个改动块的旧侧高亮(删除行专用):键为块索引。旧侧片段很小,单独着色成本可忽略。
   const oldHighlights = useMemo(
@@ -463,7 +519,16 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
   // 无改动、或正文尚未读全:就是个纯文件查看器。
   if (overlay.length === 0) {
     return h('div', { style: wrapStyle }, [
-      h(PlainCanvas, { key: 'plain', lines, scrollportRef: bindCanvas, allHighlight }),
+      h(Canvas, {
+        key: 'plain',
+        // 只读分支的 items 来自 segmentsOf(lines, []) —— 单个普通段,同样折叠。
+        items: plainItems,
+        scrollportRef: bindCanvas,
+        allHighlight,
+        unfolded,
+        onUnfold: unfold,
+        t,
+      }),
       // 已跟踪但确实没有可对比内容时,给一句说明(不是错误)。
       view !== null && view.tracked && !view.hasBaseline && !view.created
         ? h('div', { key: 'note', style: noticeStyle }, t('striatum.noDiff'))
@@ -482,40 +547,26 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
 
   return h('div', { style: wrapStyle }, [
     h('div', { key: 'row', style: rowStyle }, [
-      h('div', { key: 'canvas', style: canvasStyle, ref: bindCanvas },
-        items.map((item, i) => item.kind === 'plain'
-          ? h('div', { key: `p${i}` }, item.lines.map((line, j) => {
-              const spans = allHighlight?.[item.from + j]
-              return h('div', { key: j, style: gridRowStyle }, [
-                h('span', { key: 'on', style: gutterStyle }, ''),
-                h('span', { key: 'nn', style: gutterStyle }, String(item.from + j + 1)),
-                h('span', { key: 'sg', style: signStyle }, ' '),
-                h(LineBody, { key: 't', text: line, style: ctxTextStyle, spans }),
-              ])
-            }))
-          : item.kind === 'fold'
-            // 折叠标记占一行,行号栏空着 —— 它不是一个真实行。
-            ? h('button', {
-                key: `f${i}`,
-                type: 'button',
-                'data-striatum-fold': '',
-                style: foldStyle,
-                title: t('striatum.unfoldHint', { count: String(item.hidden) }),
-                onClick: () => {
-                  setUnfolded(prev => new Set([...prev, item.segmentFrom]))
-                },
-              }, t('striatum.folded', { count: String(item.hidden) }))
-            : h(HunkRegion, {
-                key: `h${item.hunk.index}`,
-                hunk: item.hunk,
-                t,
-                busy,
-                regionRef: registerRegion(item.hunk.index),
-                allHighlight,
-                oldHighlight: oldHighlights.get(item.hunk.index),
-                onAccept: () => { void run(() => acceptHunk(parsed!.sessionId, parsed!.path, item.hunk.index)) },
-                onRevert: () => { void run(() => revertHunk(parsed!.sessionId, parsed!.path, item.hunk.index)) },
-              }))),
+      h(Canvas, {
+        key: 'canvas',
+        items,
+        scrollportRef: bindCanvas,
+        allHighlight,
+        unfolded,
+        onUnfold: unfold,
+        t,
+        renderHunk: hunk => h(HunkRegion, {
+          key: `hunk-${hunk.index}`,
+          hunk,
+          t,
+          busy,
+          regionRef: registerRegion(hunk.index),
+          allHighlight,
+          oldHighlight: oldHighlights.get(hunk.index),
+          onAccept: () => { void run(() => acceptHunk(parsed!.sessionId, parsed!.path, hunk.index)) },
+          onRevert: () => { void run(() => revertHunk(parsed!.sessionId, parsed!.path, hunk.index)) },
+        }),
+      }),
       h(Ruler, { key: 'ruler', marks, onJump: jumpTo, t }),
     ]),
     view?.diffLimited === true ? h('div', { key: 'big', style: noticeStyle }, t('striatum.diffLimited')) : null,

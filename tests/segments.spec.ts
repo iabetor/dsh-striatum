@@ -147,4 +147,26 @@ describe('withFoldedPlain', () => {
     const rendered = items.reduce((n, i) => n + (i.kind === 'plain' ? i.lines.length : i.kind === 'fold' ? 1 : 0), 0)
     expect(rendered).toBeLessThan(big.length / 2)
   })
+
+  /**
+   * 只读分支同样折叠。
+   *
+   * 回归:折叠最初只接在「有改动」那条分支上,而只读分支(`overlay` 为空 ——
+   * 大文件最常见的路径:没有未确认改动,或用户只是打开来读)仍整份文件进 DOM。
+   * 这个组件此前只由「有改动」的场景驱动,单看 `withFoldedPlain` 的单测**无法**
+   * 发现那条分支漏接 —— 两处的输入都是同一批纯函数。
+   *
+   * 这里锁住输入形状:只读分支的 items 必须来自 `segmentsOf(lines, [])`,且
+   * 长文件确实产出折叠项。
+   */
+  it('produces the same folded shape for the read-only branch', () => {
+    const readOnly = withFoldedPlain(segmentsOf(big, []), new Set())
+    expect(readOnly.map(i => i.kind)).toEqual(['plain', 'fold', 'plain'])
+    const rendered = readOnly.reduce((n, i) => n + (i.kind === 'plain' ? i.lines.length : 1), 0)
+    // 500 行 → 2×KEEP + 1 个折叠标记
+    expect(rendered).toBe(PLAIN_FOLD_KEEP * 2 + 1)
+    // 展开后回到完整 500 行
+    const expanded = withFoldedPlain(segmentsOf(big, []), new Set([0]))
+    expect(expanded.reduce((n, i) => n + (i.kind === 'plain' ? i.lines.length : 1), 0)).toBe(big.length)
+  })
 })
