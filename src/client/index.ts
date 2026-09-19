@@ -112,11 +112,15 @@ export function apply(ctx: Context): void {
   ))
 
   // 2) 输入框上方总览条(input.dock list)
+  //
+  //    order 决定同槽位各条的上下顺序(升序 = 从上往下)。官方占用:
+  //    todo(任务)= 0、goal = 10、queue = 20。取 -10 让「未确认改动」排在
+  //    任务条**之上** —— 它是本轮唯一需要用户裁决的东西,应当先被看到。
   client.slots.inject('conversation.input.dock', () => client.slots.register(
     {
       name: 'conversation.input.dock',
       id: 'striatum-overview',
-      order: 80,
+      order: -10,
       locale: NS,
     },
     (props: { sessionId: string }) =>
