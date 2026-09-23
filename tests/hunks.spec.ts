@@ -34,9 +34,18 @@ describe('hunksOf', () => {
 
   it('merges nearby changes into one hunk', () => {
     const base = lines(20)
-    // 相隔 3 行 → 在 context=3 下会被合并为一块
-    const cur = replaceLine(replaceLine(base, 5, 'line 5 CHANGED'), 9, 'line 9 CHANGED')
+    // 中间隔 2 行 → context=1 下仍合并(改第 5 行与第 8 行)。
+    const cur = replaceLine(replaceLine(base, 5, 'line 5 CHANGED'), 8, 'line 8 CHANGED')
     expect(hunksOf(base, cur)).toHaveLength(1)
+  })
+
+  it('splits once three unchanged lines separate the changes', () => {
+    // 阈值随 HUNK_CONTEXT 变:context=1 时中间 ≤2 行合并,3 行即拆开。
+    // 这条与上一条成对,把阈值两侧都钉住 —— 只测一侧的话,常量被改动时
+    // 合并行为可能静默变宽而不被发现。
+    const base = lines(20)
+    const cur = replaceLine(replaceLine(base, 5, 'line 5 CHANGED'), 9, 'line 9 CHANGED')
+    expect(hunksOf(base, cur)).toHaveLength(2)
   })
 
   it('treats a new file (empty baseline) as all-add, with no phantom removal', () => {
@@ -53,9 +62,13 @@ describe('hunksOf', () => {
     const cur = replaceLine(replaceLine(base, 3, 'line 3 CHANGED'), 18, 'line 18 CHANGED')
     const hunks = hunksOf(base, cur)
     expect(hunks).toHaveLength(2)
-    // 第 3 行在 new 侧仍是第 3 行;第 18 行仍是第 18 行(等长替换)
-    expect(hunks[0]!.newStart).toBe(1) // hunk 含前后上下文,故从第 1 行起
-    expect(hunks[1]!.newStart).toBe(15)
+    // 第 3 行在 new 侧仍是第 3 行;第 18 行仍是第 18 行(等长替换)。
+    // hunk 含 1 行前后上下文,故起点各前移一行:2 和 17。
+    expect(hunks[0]!.newStart).toBe(2)
+    expect(hunks[1]!.newStart).toBe(17)
+    // 起点必须真的指向该块的上下文行,而不是改动行本身 —— 叠加渲染靠它定位。
+    expect(hunks[0]!.lines[0]!.kind).toBe('context')
+    expect(hunks[0]!.lines.map(l => l.text)).toContain('line 3 CHANGED')
     // 逐行内容里必须出现 del/add 各一行
     expect(hunks[0]!.lines.filter(l => l.kind === 'del').map(l => l.text)).toEqual(['line 3'])
     expect(hunks[0]!.lines.filter(l => l.kind === 'add').map(l => l.text)).toEqual(['line 3 CHANGED'])

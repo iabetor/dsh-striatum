@@ -18,6 +18,7 @@
  */
 import type { DocumentContent } from '@deepseek-ai/dsh-client-ui-sidebar-documentpreview/client'
 import type { TranslateNS } from '@deepseek-ai/dsh-client-locale/client'
+import { Button, FileTypeIcon } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { HunkView } from '../shared/wire.ts'
 import { acceptHunk, fetchChanges, keep, revertHunk, undo, StriatumApiClientError } from './api.ts'
 import { subscribeStriatumEvents } from './events.ts'
@@ -25,6 +26,7 @@ import { parseFileAddress } from './file-address.ts'
 import { highlightLines, languageForPath, type HighlightedLines } from './highlight.ts'
 import { centerScrollTop, rulerMarks, type RulerMark } from './ruler.ts'
 import { contentLines, hunkHeaderOf, hunkRows, oldSideLines, segmentsOf, withFoldedPlain, type RenderItem } from './segments.ts'
+import { StatBadge } from './StatBadge.tsx'
 import { useCallback, useEffect, useMemo, useRef, useState, h, type CSSProperties } from './react.ts'
 
 /** 本命名空间绑定的翻译函数(键集由 locales.ts 的声明约束)。 */
@@ -73,6 +75,49 @@ const rowStyle: CSSProperties = {
 }
 
 /**
+ * 头部:文件名 + 统计 + 工具按钮。几何照官方 `.header`(38px 高、底部细边框)。
+ *
+ * 官方那行还带文件下拉选择器;这里不重复 —— 文件名与左邻的文件树已经说明了
+ * 当前文件,再加一个单选项下拉没有信息量。
+ */
+const headerStyle: CSSProperties = {
+  display: 'flex',
+  flex: '0 0 auto',
+  gap: '6px',
+  alignItems: 'center',
+  boxSizing: 'border-box',
+  height: '38px',
+  padding: '0 6px 0 8px',
+  borderBottom: '0.5px solid var(--dsw-alias-border-l3)',
+  color: 'var(--dsw-alias-label-primary)',
+}
+
+/** 头部里的文件名:可省略,不挤走右侧工具。 */
+const headerPathStyle: CSSProperties = {
+  minWidth: '0',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+  fontFamily: 'var(--ds-font-family-code, ui-monospace, monospace)',
+  fontSize: '12px',
+}
+
+/**
+ * 标尺上改动标记的配色:与改动行**同一批 token**。
+ *
+ * 早先写死 `#27ae60`/`#c0392b`/`#d68910`:浅色主题下会脏,而且与改动行的
+ * `color-mix` 底色对不上 —— 同一处改动在标尺和正文里是两个颜色。
+ * @param tone - 该标记的类型。
+ * @returns 该类型的颜色。
+ */
+function markColor(tone: RulerMark['tone']): string {
+  if (tone === 'add') return 'var(--dsw-alias-state-success-primary, #27ae60)'
+  if (tone === 'del') return 'var(--dsw-alias-state-error-primary, #c0392b)'
+  // 混合块(既有增又有删):没有对应的官方语义色,保留琥珀色。
+  return '#d68910'
+}
+
+/**
  * 整文件画布:等宽、可换行,行号用 grid 对齐。
  *
  * 字体与行高对齐官方 ReviewTab(`--dsw-font-markdown-code-block` = 11px/19px);
@@ -91,13 +136,21 @@ const canvasStyle: CSSProperties = {
 /** 四栏行网格(旧行号 / 新行号 / 标记 / 正文),与官方 ReviewTab 的 `.line` 同构。 */
 const GRID_COLUMNS = '3.5em 3.5em 1.2em minmax(0, 1fr)'
 
-const gridRowStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: GRID_COLUMNS,
-  minHeight: '22px',
-  lineHeight: '22px',
-  whiteSpace: 'pre-wrap',
-  wordBreak: 'break-word',
+/**
+ * 行网格。`wrap` 决定长行折行还是横向滚动 —— 与官方 `.body[data-review-wrap]`
+ * 的两态一致:不折行时 `pre` + 画布横向滚动,折行时 `pre-wrap` + 任意断点。
+ * @param wrap - 是否折行。
+ * @returns 该状态下的行样式。
+ */
+function gridRow(wrap: boolean): CSSProperties {
+  return {
+    display: 'grid',
+    gridTemplateColumns: GRID_COLUMNS,
+    minHeight: '22px',
+    lineHeight: '22px',
+    whiteSpace: wrap ? 'pre-wrap' : 'pre',
+    ...(wrap ? { overflowWrap: 'anywhere' as const } : {}),
+  }
 }
 
 /** 行号栏(旧/新共用):右对齐、不可选中、三级文案色 —— 与官方 `.number` 一致。 */
@@ -120,15 +173,21 @@ const bodyCellStyle: CSSProperties = { paddingRight: '16px' }
 /**
  * 改动行底色:与官方 ReviewTab 同一套 `color-mix`,不再写死 `#c0392b1f` ——
  * 写死色在浅色主题下会脏,与官方并排时肉眼可辨。
+ * @param wrap - 是否折行(见 {@link gridRow})。
  */
-const ctxRowStyle: CSSProperties = { ...gridRowStyle }
-const delRowStyle: CSSProperties = {
-  ...gridRowStyle,
-  background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)',
-}
-const addRowStyle: CSSProperties = {
-  ...gridRowStyle,
-  background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent)',
+function rowStyles(wrap: boolean): { ctx: CSSProperties, del: CSSProperties, add: CSSProperties } {
+  const base = gridRow(wrap)
+  return {
+    ctx: { ...base },
+    del: {
+      ...base,
+      background: 'color-mix(in srgb, var(--dsw-alias-state-error-primary) 12%, transparent)',
+    },
+    add: {
+      ...base,
+      background: 'color-mix(in srgb, var(--dsw-alias-state-success-primary) 12%, transparent)',
+    },
+  }
 }
 const delTextStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
 const addTextStyle: CSSProperties = { color: 'var(--dsw-alias-state-success-primary)' }
@@ -188,8 +247,10 @@ const rulerStyle: CSSProperties = {
   position: 'relative',
   flex: 'none',
   width: '10px',
-  background: 'var(--dsw-alias-fill-l2, #8881)',
-  borderLeft: '0.5px solid var(--dsw-alias-border-l1, #8884)',
+  // 底色取官方 `.empty` 用的同一个 hover 面(theme 里**没有** `fill-l2` 这个
+  // token —— 之前写它一直在走硬编码 fallback,浅色主题下会脏)。
+  background: 'var(--dsw-alias-interactive-bg-hover)',
+  borderLeft: '0.5px solid var(--dsw-alias-border-l3)',
 }
 
 /** 单个改动标记:一个可点的小色块。 */
@@ -205,17 +266,8 @@ const markStyle: CSSProperties = {
   opacity: 0.85,
 }
 
-const btnStyle: CSSProperties = {
-  border: '0.5px solid var(--dsw-alias-border-l1, #8888)',
-  borderRadius: '6px',
-  background: 'transparent',
-  padding: '1px 8px',
-  fontSize: '11px',
-  cursor: 'pointer',
-  color: 'inherit',
-}
-
-const dangerStyle: CSSProperties = { ...btnStyle, borderColor: '#c0392b66', color: '#c0392b' }
+/** 操作按钮:交给官方 Button 的胶囊几何,这里只补危险色。 */
+const dangerStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
 const statStyle: CSSProperties = { opacity: 0.6, fontVariantNumeric: 'tabular-nums' }
 const spacerStyle: CSSProperties = { flex: '1 1 auto' }
 
@@ -260,7 +312,7 @@ function highlightOldSide(hunk: HunkView, lang: string | undefined): Highlighted
  * 语法高亮的 span 下标打架。多一栏比重新对齐高亮下标更稳。
  */
 function HunkRegion({
-  hunk, t, busy, onAccept, onRevert, regionRef, allHighlight, oldHighlight,
+  hunk, t, busy, onAccept, onRevert, regionRef, allHighlight, oldHighlight, wrap,
 }: {
   hunk: HunkView
   t: T
@@ -272,15 +324,18 @@ function HunkRegion({
   allHighlight: HighlightedLines | undefined
   /** 旧侧片段高亮(删除行取这里,旧文件顺序)。 */
   oldHighlight: HighlightedLines | undefined
+  /** 长行是否折行(头部开关控制)。 */
+  wrap: boolean
 }) {
   const rows: ReturnType<typeof h>[] = []
+  const styles = rowStyles(wrap)
   // 官方那种 hunk 头:让"这一块在文件的哪个位置"一眼可读,也是与官方观感
   // 最明显的一处对齐。
   rows.push(h('div', { key: 'head', style: hunkHeaderStyle }, hunkHeaderOf(hunk)))
   hunkRows(hunk).forEach((row, i) => {
     const isDel = row.kind === 'del'
     const isAdd = row.kind === 'add'
-    const style = isDel ? delRowStyle : isAdd ? addRowStyle : ctxRowStyle
+    const style = isDel ? styles.del : isAdd ? styles.add : styles.ctx
     // 正文色:新增/删除用状态色,上下文用二级文案色 —— 与官方 `.add .text` /
     // `.del .text` / `.context .text` 一致。高亮 span 自带颜色时优先。
     const textStyle = isDel ? delTextStyle : isAdd ? addTextStyle : ctxTextStyle
@@ -300,9 +355,10 @@ function HunkRegion({
     h('span', { key: 'scope', style: { opacity: 0.7 } }, t('striatum.hunkScope')),
     h('span', { key: 'stat', style: statStyle }, `+${hunk.added} -${hunk.removed}`),
     h('span', { key: 'sp', style: spacerStyle }),
-    h('button', { key: 'accept', type: 'button', disabled: busy, style: btnStyle, onClick: onAccept },
+    // 官方 Button 胶囊(与界面其他按钮同族),不再手写边框。
+    h(Button, { key: 'accept', variant: 'outline', size: 'sm', disabled: busy, onClick: onAccept },
       t('striatum.hunkAccept')),
-    h('button', { key: 'revert', type: 'button', disabled: busy, style: dangerStyle, onClick: onRevert },
+    h(Button, { key: 'revert', variant: 'outline', size: 'sm', style: dangerStyle, disabled: busy, onClick: onRevert },
       t('striatum.hunkRevert')),
   ]))
   return h('div', { key: `hunk-${hunk.index}`, ref: regionRef }, rows)
@@ -326,7 +382,7 @@ function Ruler({ marks, onJump, t }: { marks: readonly RulerMark[], onJump: (ind
         ...markStyle,
         top: `${mark.topPercent}%`,
         height: `${mark.heightPercent}%`,
-        background: mark.tone === 'add' ? '#27ae60' : mark.tone === 'del' ? '#c0392b' : '#d68910',
+        background: markColor(mark.tone),
       },
       onClick: () => { onJump(mark.index) },
     })))
@@ -367,7 +423,7 @@ function FoldRow({
  *  - `renderHunk` 由调用方给:只读分支不传(它的 items 里不会有 hunk 项)。
  */
 function Canvas({
-  items, scrollportRef, allHighlight, unfolded, onUnfold, t, renderHunk,
+  items, scrollportRef, allHighlight, unfolded, onUnfold, t, renderHunk, wrap,
 }: {
   items: readonly RenderItem[]
   scrollportRef?: (el: HTMLElement | null) => void
@@ -378,12 +434,15 @@ function Canvas({
   t: T
   /** 改动块的渲染器;只读分支省略。 */
   renderHunk?: ((hunk: HunkView) => ReturnType<typeof h>) | undefined
+  /** 长行是否折行(头部开关控制)。 */
+  wrap: boolean
 }) {
+  const rows = rowStyles(wrap)
   return h('div', { style: canvasStyle, ref: scrollportRef },
     items.map((item, i) => item.kind === 'plain'
       // 四栏网格:旧行号栏留空、无标记 —— 纯文件行与改动行共用列宽,从"纯查看"
       // 切到"有改动"时列不会跳。
-      ? h('div', { key: `p${i}` }, item.lines.map((text, j) => h('div', { key: j, style: gridRowStyle }, [
+      ? h('div', { key: `p${i}` }, item.lines.map((text, j) => h('div', { key: j, style: rows.ctx }, [
           h('span', { key: 'on', style: gutterStyle }, ''),
           h('span', { key: 'nn', style: gutterStyle }, String(item.from + j + 1)),
           h('span', { key: 'sg', style: signStyle }, ' '),
@@ -401,6 +460,45 @@ function Canvas({
 }
 
 /**
+ * 预览头部:文件类型图标 + 文件名 + 改动统计 + 换行开关。
+ *
+ * 对齐官方 ReviewTab 的头部几何(38px、底部细边框、右侧 28×28 图标键)。
+ * @param props - 显示路径、统计、换行状态与其切换。
+ * @returns 头部元素。
+ */
+function Header({ display, path, added, removed, wrap, onToggleWrap, t }: {
+  display: string
+  /** 查表用的绝对路径(文件类型图标按它分类)。 */
+  path: string
+  added: number | undefined
+  removed: number | undefined
+  wrap: boolean
+  onToggleWrap: () => void
+  t: T
+}): ReturnType<typeof h> {
+  return h('div', { style: headerStyle, 'data-striatum-header': '' },
+    // 文件类型图标:与总览条、本轮改动条同一套识别,不再是纯文字。
+    path === '' ? null : h('span', { style: { display: 'inline-flex', flex: 'none' } },
+      h(FileTypeIcon, { path, size: 16 })),
+    h('span', { style: headerPathStyle, title: display }, display),
+    h('span', { style: { flex: '1 1 auto' } }),
+    StatBadge({ added, removed, t }),
+    h(Button, {
+      variant: 'ghost', size: 'sm',
+      // aria-pressed 与官方一致:这是开关,不是普通按钮。
+      'aria-pressed': wrap,
+      title: t(wrap ? 'striatum.wrap.on' : 'striatum.wrap.off'),
+      onClick: onToggleWrap,
+      // 开启时用主文案色 + 官方 hover 面,与"已按下"的观感一致(官方 .tool
+      // 的 aria-pressed 也是这个处理)。
+      style: wrap
+        ? { color: 'var(--dsw-alias-label-primary)', background: 'var(--dsw-alias-interactive-bg-hover)' }
+        : undefined,
+    }, t('striatum.wrapShort')),
+  )
+}
+
+/**
  * 文件预览里的改动视图。
  *
  * sessionId 从资源地址解出(dsh-resource://file/session/<id>/<path>)。
@@ -414,6 +512,11 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
 
   const canvas = useRef<HTMLElement | null>(null)
   const regions = useRef(new Map<number, HTMLElement>())
+  /**
+   * 长行是否换行。默认**不换行**(横向滚动),与官方 ReviewTab 的默认一致 ——
+   * 代码长行折行会打乱缩进层次,横向滚动反而更好读。需要时由头部按钮切换。
+   */
+  const [wrap, setWrap] = useState(false)
 
   useEffect(() => {
     if (parsed === null) return
@@ -519,6 +622,17 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
   // 无改动、或正文尚未读全:就是个纯文件查看器。
   if (overlay.length === 0) {
     return h('div', { style: wrapStyle }, [
+      h(Header, {
+        key: 'head',
+        // 未跟踪时 view 为 null —— 用资源地址里的路径兜底,头部不至于空着。
+        display: view?.display ?? parsed?.path ?? '',
+        path: view?.path ?? parsed?.path ?? '',
+        added: undefined,
+        removed: undefined,
+        wrap,
+        onToggleWrap: () => { setWrap(v => !v) },
+        t,
+      }),
       h(Canvas, {
         key: 'plain',
         // 只读分支的 items 来自 segmentsOf(lines, []) —— 单个普通段,同样折叠。
@@ -528,6 +642,7 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
         unfolded,
         onUnfold: unfold,
         t,
+        wrap,
       }),
       // 已跟踪但确实没有可对比内容时,给一句说明(不是错误)。
       view !== null && view.tracked && !view.hasBaseline && !view.created
@@ -536,7 +651,9 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
       view !== null && view.diffLimited
         ? h('div', { key: 'big', style: noticeStyle }, t('striatum.diffLimited'))
         : null,
-      error !== null ? h('div', { key: 'err', style: { ...noticeStyle, color: '#c0392b' } }, error) : null,
+      error !== null
+        ? h('div', { key: 'err', style: { ...noticeStyle, color: 'var(--dsw-alias-state-error-primary)' } }, error)
+        : null,
     ])
   }
 
@@ -546,6 +663,16 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
   )
 
   return h('div', { style: wrapStyle }, [
+    h(Header, {
+      key: 'head',
+      display: view?.display ?? parsed?.path ?? '',
+      path: view?.path ?? parsed?.path ?? '',
+      added: totals.added,
+      removed: totals.removed,
+      wrap,
+      onToggleWrap: () => { setWrap(v => !v) },
+      t,
+    }),
     h('div', { key: 'row', style: rowStyle }, [
       h(Canvas, {
         key: 'canvas',
@@ -555,11 +682,13 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
         unfolded,
         onUnfold: unfold,
         t,
+        wrap,
         renderHunk: hunk => h(HunkRegion, {
           key: `hunk-${hunk.index}`,
           hunk,
           t,
           busy,
+          wrap,
           regionRef: registerRegion(hunk.index),
           allHighlight,
           oldHighlight: oldHighlights.get(hunk.index),
@@ -570,24 +699,24 @@ export function ChangesBody({ resourceAddress, content, t, scrollportRef, reload
       h(Ruler, { key: 'ruler', marks, onJump: jumpTo, t }),
     ]),
     view?.diffLimited === true ? h('div', { key: 'big', style: noticeStyle }, t('striatum.diffLimited')) : null,
-    error !== null ? h('div', { key: 'err', style: { ...noticeStyle, color: '#c0392b' } }, error) : null,
+    error !== null
+      ? h('div', { key: 'err', style: { ...noticeStyle, color: 'var(--dsw-alias-state-error-primary)' } }, error)
+      : null,
     // 文件级(最下方):作用于整个文件。
     h('div', { key: 'fileops', style: fileFooterStyle }, [
       h('span', { key: 'label', style: { opacity: 0.7 } }, t('striatum.fileLevel')),
       h('span', { key: 'stat', style: statStyle }, `+${totals.added} -${totals.removed}`),
       h('span', { key: 'sp', style: spacerStyle }),
-      h('button', {
+      h(Button, {
         key: 'keep',
-        type: 'button',
+        variant: 'outline', size: 'sm',
         disabled: busy,
-        style: btnStyle,
         onClick: () => { void run(() => keep(parsed!.sessionId, parsed!.path)) },
       }, t('striatum.keepAllFile')),
-      h('button', {
+      h(Button, {
         key: 'undo',
-        type: 'button',
+        variant: 'outline', size: 'sm', style: dangerStyle,
         disabled: busy || view?.canUndo !== true,
-        style: dangerStyle,
         onClick: () => { void run(() => undo(parsed!.sessionId, parsed!.path)) },
       }, t('striatum.undoFile')),
     ]),

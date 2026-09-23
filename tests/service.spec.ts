@@ -94,7 +94,9 @@ describe('StriatumService', () => {
     await service.record('sess-1', { turn: 1, step: 1, path: A, oldText: A0, newText: A1 })
     let st = await service.state('sess-1')
     expect(st.files).toHaveLength(1)
-    expect(st.files[0]).toMatchObject({ path: A, turns: [1], changeCount: 1, hasBaseline: false })
+    expect(st.files[0]).toMatchObject({
+      path: A, turns: [1], changeCount: 1, canUndo: false, undoBlockedBy: 'no-baseline',
+    })
 
     await service.keep('sess-1', A)
     st = await service.state('sess-1')

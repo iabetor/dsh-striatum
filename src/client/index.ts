@@ -105,7 +105,6 @@ export function apply(ctx: Context): void {
     (props: TurnTailOwnerProps & { matched: readonly string[] } & { sessionId: string; t: (k: string, p?: Record<string, unknown>) => string }) =>
       h(TurnTailStripBody, {
         turn: props.turn,
-        openFile: props.openFile,
         sessionId: props.sessionId,
         t: props.t,
       }),

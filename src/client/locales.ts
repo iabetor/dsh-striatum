@@ -34,6 +34,8 @@ export const zh = {
   'striatum.changes': '改动',
   'striatum.viewDiff': '查看 diff',
   'striatum.turnBadge': '第 {turns} 轮 · {count} 次',
+  // 单一轮次时只报次数:逐行重复「第 N 轮」是噪声(见 OverviewStrip 的 spansMultipleTurns)。
+  'striatum.changeCount': '{count} 次',
   // 文件预览内的「改动」渲染器
   'striatum.badge.label': '改动',
   'striatum.unresolvedAddress': '无法解析该文件的会话地址。',
@@ -50,6 +52,15 @@ export const zh = {
   'striatum.unfoldHint': '展开这 {count} 行未改动内容',
   'striatum.fileLevel': '整个文件',
   'striatum.keepAllFile': 'Keep 整个文件',
+  // 行数统计(与官方 ChangedFiles 同口径)
+  'striatum.stat.added': '+{count}',
+  'striatum.stat.removed': '-{count}',
+  'striatum.stat.title': '相对基线:新增 {added} 行,删除 {removed} 行',
+  'striatum.stat.partial': '合计不含 {count} 个无法统计的文件(已删除或过大)',
+  // 头部工具(对齐官方 ReviewTab 的 wrap 开关)
+  'striatum.wrap.on': '长行换行(点击改为不换行)',
+  'striatum.wrap.off': '长行不换行(点击改为换行)',
+  'striatum.wrapShort': '换行',
 }
 
 /** 英文字典(同键集)。 */
@@ -72,6 +83,8 @@ export const en: Record<StriatumKey, string> = {
   'striatum.changes': 'Changes',
   'striatum.viewDiff': 'View diff',
   'striatum.turnBadge': 'Turn {turns} · {count} change(s)',
+  // One turn only: report the count alone (repeating "Turn N" per row is noise).
+  'striatum.changeCount': '{count} change(s)',
   // In-preview "changes" renderer
   'striatum.badge.label': 'Changes',
   'striatum.unresolvedAddress': 'Could not resolve this file\'s session address.',
@@ -88,6 +101,15 @@ export const en: Record<StriatumKey, string> = {
   'striatum.unfoldHint': 'Expand these {count} unchanged lines',
   'striatum.fileLevel': 'Whole file',
   'striatum.keepAllFile': 'Keep whole file',
+  // Line statistics (same counting as the official ChangedFiles)
+  'striatum.stat.added': '+{count}',
+  'striatum.stat.removed': '-{count}',
+  'striatum.stat.title': 'Versus baseline: {added} line(s) added, {removed} removed',
+  'striatum.stat.partial': 'Total excludes {count} file(s) that cannot be counted (deleted or too large)',
+  // Header tools (mirroring the official ReviewTab wrap toggle)
+  'striatum.wrap.on': 'Long lines wrap (click to disable)',
+  'striatum.wrap.off': 'Long lines do not wrap (click to enable)',
+  'striatum.wrapShort': 'Wrap',
 }
 
 /** 本命名空间的键联合。 */

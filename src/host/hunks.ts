@@ -12,8 +12,22 @@
  */
 import { applyPatch, formatPatch, reversePatch, structuredPatch } from 'diff'
 
-/** 每块改动两侧保留的上下文行数;与 harness computeHunkDiffs 保持一致。 */
-export const HUNK_CONTEXT = 3
+/**
+ * 每块改动两侧保留的上下文行数。
+ *
+ * harness 的对话流 diff 卡片用 3 行(见 packages/fs/tool-fs/src/diff.ts 的
+ * `DIFF_CONTEXT`),这里**刻意取更小的 1**:文件预览在每个 hunk 末尾紧跟一条
+ * 「接受/撤销」操作条,上下文越多按钮离改动越远 —— 实测(context=3)平均隔 3 行,
+ * 视觉上像是操作条与改动块分了家。取 1 后距离降到 1 行。
+ *
+ * 为什么不取 0:上下文同时决定**相邻改动能否合并进同一块**。实测本仓库当前
+ * 一批改动:context=3 → 36 块,1 → 42 块,0 → 53 块。归零会让相近的改动各自
+ * 成块,操作条数量反而增加 47%,更乱。1 是"按钮贴近改动"与"块不过碎"的拐点。
+ *
+ * 与对话流不一致的代价可接受:两边都是同一份 (baseline, current) 现算出的,
+ * 只是切块粒度不同,不存在"内容对不上"的问题。
+ */
+export const HUNK_CONTEXT = 1
 
 /** 一个可操作的改动块(带在当前文件中的确切位置)。 */
 export interface Hunk {

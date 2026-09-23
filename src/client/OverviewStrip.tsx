@@ -6,9 +6,13 @@
  * Keep/Undo(文件级语义)。
  */
 import type { TranslateNS } from '@deepseek-ai/dsh-client-locale/client'
+import { Button, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { FileStateView } from '../shared/wire.ts'
 import { fetchState, keep, undo, StriatumApiClientError } from './api.ts'
 import { subscribeStriatumEvents } from './events.ts'
+import { FileLink } from './FileLink.tsx'
+import { spansMultipleTurns } from './overview-rows.ts'
+import { StatBadge, totalStats } from './StatBadge.tsx'
 import { useEffect, useState, h, type CSSProperties } from './react.ts'
 
 /** 本组件经槽位注入的能力。 */
@@ -63,20 +67,27 @@ const listStyle: CSSProperties = {
 }
 
 const rowStyle: CSSProperties = {
-  display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap',
-  width: '100%', padding: '3px 6px',
+  display: 'flex', alignItems: 'center', gap: '8px',
+  width: '100%', padding: '4px 8px',
 }
 
-const btnStyle: CSSProperties = {
-  border: '0.5px solid var(--dsw-alias-border-l1, #8888)',
-  borderRadius: '6px', background: 'transparent',
-  padding: '1px 8px', fontSize: '12px', cursor: 'pointer', color: 'inherit',
+/** 行尾操作组:始终贴右,与左侧文件信息分开。 */
+const rowActionsStyle: CSSProperties = {
+  display: 'inline-flex', gap: '4px', alignItems: 'center', flex: 'none', marginLeft: 'auto',
 }
 
-const dangerStyle: CSSProperties = { ...btnStyle, borderColor: '#c0392b66', color: '#c0392b' }
+/** 撑开用占位:把操作组推到行尾。 */
+const rowSpacerStyle: CSSProperties = { flex: '1 1 auto' }
 
-function basename(path: string): string {
-  return path.split('/').pop() ?? path
+const dangerStyle: CSSProperties = { color: 'var(--dsw-alias-state-error-primary)' }
+
+/** 头部批量按钮:官方 ghost 胶囊,与界面其他按钮同族。 */
+const headerBtnStyle: CSSProperties = { flex: 'none' }
+
+/** 撤销类按钮的着色(官方 Button 的 outline + 危险色)。 */
+const headerDangerStyle: CSSProperties = {
+  flex: 'none',
+  color: 'var(--dsw-alias-state-error-primary)',
 }
 
 /** OverviewStrip 主体:常驻于输入框上方、与 composer 对齐的卡片。 */
@@ -101,6 +112,10 @@ export function OverviewStripBody({ t, sessionId, onOpenDiff }: OverviewStripPro
 
   if (!ready) return null
   if (files.length === 0) return null
+
+  const totals = totalStats(files)
+  // 跨轮时才逐行标轮次(见 spansMultipleTurns)。
+  const multiTurn = spansMultipleTurns(files)
 
   const onKeep = async (path?: string): Promise<void> => {
     setBusyPath(path ?? '*'); setError(null)
@@ -141,52 +156,76 @@ export function OverviewStripBody({ t, sessionId, onOpenDiff }: OverviewStripPro
         }, expanded ? '▾' : '▸'),
         h('span', { style: { fontWeight: 600, flex: 'none' } },
           `${t('striatum.label')} · ${t('striatum.files', { count: String(files.length) })}`),
+        // 合计统计:与官方 ChangedFiles 头部的 `+156 -43` 同位。
+        StatBadge({
+          added: totals.uncounted === files.length ? undefined : totals.added,
+          removed: totals.uncounted === files.length ? undefined : totals.removed,
+          t,
+          title: totals.uncounted === 0
+            ? undefined
+            : t('striatum.stat.partial', { count: String(totals.uncounted) }),
+        }),
         h('span', { style: { flex: 1 } }),
-        h('button', {
-          type: 'button', disabled: busyPath !== null,
-          onClick: (event: MouseEvent) => { event.stopPropagation(); void onKeep() },
-          style: btnStyle,
+        // 批量操作:官方 Button 胶囊(与界面其他按钮同族),不再是手写边框。
+        h(Button, {
+          variant: 'ghost', size: 'sm', style: headerBtnStyle,
+          disabled: busyPath !== null,
+          onClick: event => { event.stopPropagation(); void onKeep() },
         }, t('striatum.keepAll')),
-        h('button', {
-          type: 'button', disabled: busyPath !== null,
-          onClick: (event: MouseEvent) => {
+        h(Button, {
+          variant: 'ghost', size: 'sm', style: headerDangerStyle,
+          disabled: busyPath !== null,
+          onClick: event => {
             event.stopPropagation()
             void Promise.all(files.map(f => onUndo(f.path).catch(() => undefined)))
           },
-          style: dangerStyle,
         }, t('striatum.undoAll')),
       ),
       // 展开的文件列表(限高滚动)
       expanded
-        ? h('div', { style: listStyle }, files.map(f => h('div', { key: f.path, style: { ...rowStyle, justifyContent: 'flex-start' } },
-          h('span', { style: { fontFamily: 'monospace', flex: 'none' } }, basename(f.path)),
-          h('span', { style: { opacity: 0.7, flex: 'none' } },
-            t('striatum.turnBadge', { turns: f.turns.join(','), count: String(f.changeCount) })),
-          !f.hasBaseline
-            ? h('span', { style: { color: '#888', flex: 'none' } }, t('striatum.noBaseline'))
-            : !f.hashMatches
-              ? h('span', { style: { color: '#b8860b', flex: 'none' } }, t('striatum.conflict'))
+        ? h('div', { style: listStyle }, files.map(f => h('div', { key: f.path, style: rowStyle },
+          // 图标 + 截断文件名:与「本轮改动」条共用 FileLink,截断规则只有一份。
+          // 这里不给 onOpen —— 打开动作由右侧的「查看 diff」承担,文件名不抢它。
+          h(FileLink, { display: f.display, path: f.path }),
+          // 轮次只在**跨轮**时显示:单一轮次下逐行写「第 21 轮」是 9 行重复同一句
+          // 话,纯噪声。「N 次」始终保留 —— 它逐文件不同,是真信息。
+          h(Tag, { tone: 'quiet' },
+            t(multiTurn ? 'striatum.turnBadge' : 'striatum.changeCount',
+              { turns: f.turns.join(','), count: String(f.changeCount) })),
+          // 每文件统计(与官方文件行的 `+3 -1` 同位)。missing 时画不出来,不显示。
+          StatBadge({ added: f.added, removed: f.removed, t }),
+          // 不可撤销的原因由 host 下发(undoBlockedBy),客户端不自行推断 ——
+          // 否则「文件已被删除」会只留一个不可点的按钮而没有任何解释。
+          // 用 Tag 而不是裸文字:它是个**状态**,该有状态的形状与底色。
+          f.canUndo
+            ? null
+            : h(Tag, { tone: f.undoBlockedBy === 'hash-mismatch' ? 'warning' : 'danger' },
+                t(f.undoBlockedBy === 'file-unreadable' ? 'striatum.unreadable'
+                  : f.undoBlockedBy === 'hash-mismatch' ? 'striatum.conflict'
+                    : 'striatum.noBaseline')),
+          h('span', { style: rowSpacerStyle }),
+          h('span', { style: rowActionsStyle },
+            // 「diff」:打开该文件的预览(注册了改动渲染器的类型会抢先显示 diff)。
+            onOpenDiff !== undefined
+              ? h(Button, {
+                  variant: 'ghost', size: 'sm',
+                  onClick: () => { onOpenDiff(f.path) },
+                }, t('striatum.viewDiff'))
               : null,
-          h('span', { style: { flex: 1 } }),
-          // 「diff」:打开该文件的预览(注册了改动渲染器的类型会抢先显示 diff)。
-          onOpenDiff !== undefined
-            ? h('button', {
-                type: 'button',
-                onClick: () => { onOpenDiff(f.path) },
-                style: btnStyle,
-              }, t('striatum.viewDiff'))
-            : null,
-          h('button', {
-            type: 'button', disabled: busyPath !== null, onClick: () => { void onKeep(f.path) },
-            style: btnStyle,
-          }, t('striatum.keep')),
-          h('button', {
-            type: 'button', disabled: busyPath !== null || !f.hasBaseline || !f.hashMatches,
-            onClick: () => { void onUndo(f.path) }, style: dangerStyle,
-          }, t('striatum.undo')),
+            h(Button, {
+              variant: 'outline', size: 'sm',
+              disabled: busyPath !== null, onClick: () => { void onKeep(f.path) },
+            }, t('striatum.keep')),
+            h(Button, {
+              variant: 'outline', size: 'sm', style: dangerStyle,
+              // 用 host 下发的 canUndo,不再自行推导(删掉的文件曾是"可点却失败")。
+              disabled: busyPath !== null || !f.canUndo,
+              onClick: () => { void onUndo(f.path) },
+            }, t('striatum.undo')),
+          ),
         )))
         : null,
-      error !== null ? h('div', { style: { ...rowStyle, color: '#c0392b' } }, error) : null,
+      error !== null ? h('div', { style: { ...rowStyle, color: 'var(--dsw-alias-state-error-primary)' } }, error) : null,
     ),
   )
 }

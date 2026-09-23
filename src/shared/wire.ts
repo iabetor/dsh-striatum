@@ -7,8 +7,29 @@
 export interface FileStateView {
   /** 会话工作区内的规范化路径。 */
   path: string
-  /** 是否已有基线(可 undo)。false = 从未 keep 过,undo 禁用。 */
-  hasBaseline: boolean
+  /**
+   * 给人看的短路径(相对会话工作区根;工作区外为 `~/…` 或绝对路径)。
+   *
+   * 由 host 计算而不是客户端:只有 host 知道 cwd。**显示与操作必须分开** ——
+   * 列表显示这个,而 keep/undo/diff 一律用 {@link path},后者才是查表用的键。
+   */
+  display: string
+  /**
+   * 撤销是否真的可用(host 判定)。
+   *
+   * 客户端**不要**自己推导:曾经这里还有个 `hashMatches`,客户端用
+   * `hasBaseline && hashMatches` 拼出"可撤销",而文件被删除时当前 hash 读不到、
+   * `hashMatches` 反而为真 —— 按钮可点、点击却抛 `file-unreadable`。判定条件
+   * 只此一份,且由唯一知情的一方(host)给出。
+   */
+  canUndo: boolean
+  /**
+   * 不可撤销的原因(仅当 {@link canUndo} 为假时有意义)。
+   *
+   * 与 host 的 UndoErrorCode 同集合 —— 客户端据此选文案,不自行推断,
+   * 否则「文件已删除」这类情形会只显示一个不可点的按钮而没有任何解释。
+   */
+  undoBlockedBy?: 'no-baseline' | 'file-unreadable' | 'hash-mismatch'
   /** 第一个未确认改动所在轮(UI 展示)。 */
   firstPendingTurn: number
   /** 最近一个未确认改动所在轮(UI 展示)。 */
@@ -17,8 +38,17 @@ export interface FileStateView {
   changeCount: number
   /** 涉及轮次列表(升序,UI 展示如 "第1轮, 第2轮")。 */
   turns: number[]
-  /** 外部修改检测:当前文件 hash 与登记时是否一致。false = 可能被外部改过。 */
-  hashMatches: boolean
+  /**
+   * 相对基线的行数统计(与官方 ChangedFiles 的 `+n -m` 同口径:只数增删行,
+   * 不含上下文)。
+   *
+   * 由 host 算而不是客户端:基线只有 host 有,客户端拿不到可比对的两侧全文。
+   * 读不到文件或超限时为 undefined —— 此时**不显示**统计,而不是显示 `+0 -0`
+   * (那会把"不知道"谎报成"没有改动")。
+   */
+  added?: number
+  /** 见 {@link added}。 */
+  removed?: number
 }
 
 /**
@@ -69,6 +99,8 @@ export interface HunkLineView {
  */
 export interface FileChangesView {
   path: string
+  /** 给人看的短路径(与 {@link FileStateView.display} 同一规则),头部展示用。 */
+  display: string
   /**
    * striatum 是否在跟踪这个文件。
    *

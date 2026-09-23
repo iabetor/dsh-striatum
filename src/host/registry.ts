@@ -13,6 +13,7 @@
 import type { DisplayRecordView, FileChangesView, FileStateView } from '../shared/wire.ts'
 import {
   acceptHunk as acceptHunkIn,
+  hunkTotals,
   hunksOf,
   revertHunk as revertHunkIn,
   type Hunk,
@@ -87,6 +88,16 @@ export interface FileFacts {
 export interface FileIo {
   readFacts(path: string): Promise<FileFacts>
   normalizePath(path: string): string
+  /**
+   * 把绝对路径渲染成给人看的短路径(规则见 host/paths.ts 的 displayPathOf)。
+   *
+   * 放在 FileIo 而不是客户端:只有 host 知道会话工作区根(cwd),客户端拿到的是
+   * 绝对路径,自己猜不出该从哪里截断。此前客户端用 `basename()` 只留文件名,
+   * 于是同一目录下的多个 `index.ts` 在列表里完全无法区分。
+   * @param path - 绝对路径。
+   * @returns 相对工作区根的短路径。
+   */
+  displayPath(path: string): string
 }
 
 /**
@@ -116,9 +127,10 @@ function baselineOf(file: PersistedFileState): string | null {
  * 但仍回报 readable/hasBaseline,让 UI 能给出准确的降级提示。
  * @param file - 该文件的持久化状态。
  * @param facts - 刚读到的文件事实。
+ * @param display - 短路径(由调用方从 FileIo 取得;自由函数拿不到 io)。
  * @returns 单文件改动视图。
  */
-function changesOf(file: PersistedFileState, facts: FileFacts): FileChangesView {
+function changesOf(file: PersistedFileState, facts: FileFacts, display: string): FileChangesView {
   const current = facts.currentContent
   const baseline = baselineOf(file)
   const tooBig = baseline !== null && current !== null
@@ -126,19 +138,23 @@ function changesOf(file: PersistedFileState, facts: FileFacts): FileChangesView 
   const usable = current !== null && baseline !== null && !tooBig
   return {
     path: file.path,
+    display,
     tracked: true,
+    // 这里保持「真实基线」语义(与 created 配对:created=false 且此位为假 =
+    // 真的没有可对比内容)。撤销能力由 canUndo 单独表达,它才用统一的 baselineOf。
     hasBaseline: file.baseline !== null,
     created: file.baseline === null && file.created,
     hunks: usable ? hunksOf(baseline, current) : [],
-    canUndo: file.baseline !== null && hasPending(file),
+    canUndo: baselineOf(file) !== null && hasPending(file),
     diffLimited: tooBig,
   }
 }
 
 /** striatum 未跟踪的文件:只有"无改动"这一事实,不编造其它。 */
-export function untrackedChangesView(path: string): FileChangesView {
+export function untrackedChangesView(path: string, display: string): FileChangesView {
   return {
     path,
+    display,
     tracked: false,
     hasBaseline: false,
     created: false,
@@ -396,7 +412,12 @@ export class ChangeRegistry {
     const path = this.io.normalizePath(pathRaw)
     const file = this.state.files[path]
     if (file === undefined || !hasPending(file)) throw new UndoError('no-pending', 'no pending change for this file', path)
-    if (file.baseline === null || file.baselineHash === null) {
+    // 基线取法与 baselineOf 一致(真实基线 → 新建的空基线):新建文件同样可撤销。
+    // 早先这里直查 `file.baseline === null`,绕过了 baselineOf 的「新建 = 空文件」
+    // 推断,于是新建文件永远报 no-baseline,而预览里却能正常显示整篇新增 ——
+    // 同一个概念两处判据不一致。
+    const baseline = baselineOf(file)
+    if (baseline === null) {
       throw new UndoError('no-baseline', 'file has no baseline (never kept); cannot undo to before its first change', path)
     }
     const facts = await this.io.readFacts(path)
@@ -406,7 +427,10 @@ export class ChangeRegistry {
     if (facts.currentHash !== file.lastKnownHash) {
       throw new UndoError('hash-mismatch', 'file was modified outside the agent; undo refused', path)
     }
-    return { content: file.baseline, path }
+    // 写回 baselineOf 的结果而非 file.baseline:新建文件没有真实基线,写回的是空
+    // 内容(即它被创建时的样子)。清空而不是删除 —— harness 的 fs 契约没有删除
+    // 能力(见 baselineOf 注释),清空是这套边界内可逆且可预测的撤销语义。
+    return { content: baseline, path }
   }
 
   /** host 成功写回后调用:更新状态。undo 后文件回到基线,条目删除。 */
@@ -422,7 +446,9 @@ export class ChangeRegistry {
     const path = this.io.normalizePath(pathRaw)
     const file = this.state.files[path]
     if (file === undefined || !hasPending(file)) return { ok: false, reason: 'no-pending' }
-    if (file.baseline === null || file.baselineHash === null) return { ok: false, reason: 'no-baseline' }
+    // 与 prepareUndo 同一判据:新建文件有(空)基线,可撤销。两处必须一致,否则
+    // UI 显示可撤销而实际拒绝,或反之。
+    if (baselineOf(file) === null) return { ok: false, reason: 'no-baseline' }
     const facts = await this.io.readFacts(path)
     if (facts.currentHash === null) return { ok: false, reason: 'file-unreadable' }
     if (facts.currentHash !== file.lastKnownHash) return { ok: false, reason: 'hash-mismatch' }
@@ -442,7 +468,7 @@ export class ChangeRegistry {
     const file = this.state.files[path]
     if (file === undefined) return []
     const facts = await this.io.readFacts(path).catch(() => ({ currentContent: null, currentHash: null }))
-    return changesOf(file, facts).hunks
+    return changesOf(file, facts, this.io.displayPath(file.path)).hunks
   }
 
   /**
@@ -530,7 +556,7 @@ export class ChangeRegistry {
     const file = this.state.files[path]
     if (file === undefined) return undefined
     const facts = await this.io.readFacts(path).catch(() => ({ currentContent: null, currentHash: null }))
-    return changesOf(file, facts)
+    return changesOf(file, facts, this.io.displayPath(file.path))
   }
 
   /** 「待确认」文件级视图(仅含 pending 文件),按最近改动轮倒序。 */
@@ -539,14 +565,32 @@ export class ChangeRegistry {
     for (const file of Object.values(this.state.files)) {
       if (!hasPending(file)) continue
       const facts = await this.io.readFacts(file.path).catch(() => ({ currentContent: null, currentHash: null }))
+      const canUndo = baselineOf(file) !== null
+        && facts.currentHash !== null
+        && facts.currentHash === file.lastKnownHash
+      // 统计复用上面这次读取的内容,不额外读盘。基线不可用(从未 Keep 且非新建)
+      // 或当前读不到时给 undefined —— UI 据此不显示统计,而不是显示 +0 -0。
+      const baseline = baselineOf(file)
+      const totals = baseline !== null && facts.currentContent !== null
+        ? hunkTotals(hunksOf(baseline, facts.currentContent))
+        : null
       out.push({
         path: file.path,
-        hasBaseline: file.baseline !== null,
+        display: this.io.displayPath(file.path),
+        // 撤销是否真的可用,由 host 判定并下发 —— 判定需要"文件现在读得到吗"与
+        // "内容还是登记时那份吗",两者只有读得到文件的这一侧才知道。此前由客户端
+        // 用两个下发字段拼,删掉的文件因此变成"可点却失败"。
+        canUndo,
+        ...(canUndo ? {} : {
+          undoBlockedBy: baseline === null ? 'no-baseline' as const
+            : facts.currentHash === null ? 'file-unreadable' as const
+              : 'hash-mismatch' as const,
+        }),
         firstPendingTurn: file.firstPendingTurn,
         lastPendingTurn: file.lastPendingTurn,
         changeCount: file.changeCount,
         turns: [...file.turns],
-        hashMatches: facts.currentHash === null || file.lastKnownHash === null || facts.currentHash === file.lastKnownHash,
+        ...(totals === null ? {} : { added: totals.added, removed: totals.removed }),
       })
     }
     out.sort((a, b) => b.lastPendingTurn - a.lastPendingTurn)

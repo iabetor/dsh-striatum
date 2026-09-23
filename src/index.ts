@@ -17,6 +17,7 @@ import type { FsTarget, FsWriteOutcome } from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-fs'
 import type { FileChangesView, StriatumState } from './shared/wire.ts'
 import { ChangeRegistry, hashOf, untrackedChangesView, type ChangeInput, type FileIo } from './host/registry.ts'
+import { displayPathOf } from './host/paths.ts'
 import { readSessionState, safeSessionId, writeSessionState, storageRoot } from './host/store.ts'
 import { registerCapture } from './host/capture.ts'
 import { registerStriatumApi, type SseClients } from './host/api.ts'
@@ -89,6 +90,15 @@ function makeFileIo(fs: StriatumFsFace, cwd: string | undefined): FileIo {
       } catch {
         return { currentContent: null, currentHash: null }
       }
+    },
+    /**
+     * 短路径渲染(规则见 {@link displayPathOf})。**只用于显示** —— keep/undo/diff
+     * 仍传绝对路径,那个才是 registry 的查表键。
+     * @param path - 绝对路径。
+     * @returns 给人看的短路径。
+     */
+    displayPath(path: string): string {
+      return displayPathOf(path, cwd)
     },
   }
 }
@@ -261,7 +271,10 @@ export class StriatumService extends Service implements StriatumServiceFace {
   /** 单文件的改动视图(文件预览渲染器用)。未跟踪的文件返回"无改动"。 */
   async changes(sessionId: string, path: string): Promise<FileChangesView> {
     const registry = await this.registryFor(sessionId)
-    return await registry.changesFor(path) ?? untrackedChangesView(path)
+    const view = await registry.changesFor(path)
+    if (view !== undefined) return view
+    // 未跟踪也要给 display:预览头部显示文件名,规则须与已跟踪的一致。
+    return untrackedChangesView(path, displayPathOf(path, await this.cwdOf(sessionId)))
   }
 
   /**

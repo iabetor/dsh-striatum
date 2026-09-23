@@ -22,6 +22,13 @@ class FakeFs implements FileIo {
   normalizePath(path: string): string {
     return path
   }
+  /**
+   * 假实现:fixture 路径已经是短名(`/a.ts`),显示路径直接原样返回。
+   * 真实的「相对 cwd 截断」在 index.ts 的 makeFileIo 里,由 index 层测试覆盖。
+   */
+  displayPath(path: string): string {
+    return path
+  }
   async readFacts(path: string): Promise<FileFacts> {
     const content = this.contents.get(path)
     return content === undefined
@@ -68,7 +75,11 @@ describe('recordChange', () => {
     expect(views[0]).toMatchObject({
       path: A, firstPendingTurn: 1, lastPendingTurn: 1, turns: [1], changeCount: 1,
     })
-    expect(views[0]!.hashMatches).toBe(true)
+    expect(views[0]!.canUndo).toBe(false)
+    expect(views[0]!.undoBlockedBy).toBe('no-baseline')
+    // 没有基线就没有可比对的统计 —— 不下发数字,UI 便不显示,而不是谎报 +0 -0。
+    expect(views[0]!.added).toBeUndefined()
+    expect(views[0]!.removed).toBeUndefined()
     expect(r.displayRecords()).toHaveLength(1)
   })
 
@@ -89,20 +100,33 @@ describe('recordChange', () => {
 
   it('skips empty path after normalize', async () => {
     const fs = new FakeFs()
-    const io: FileIo = { normalizePath: () => '', readFacts: fs.readFacts.bind(fs) }
+    const io: FileIo = { normalizePath: () => '', displayPath: p => p, readFacts: fs.readFacts.bind(fs) }
     const r = new ChangeRegistry('s', io)
     await r.recordChange({ turn: 1, step: 1, path: A, oldText: null, newText: 'x' })
     expect(r.snapshot().files).toEqual({})
     expect(r.hasPending(A)).toBe(false)
   })
 
-  it('tolerates unreadable file at record time', async () => {
-    const fs = new FakeFs() // 文件不存在(登记时读不到)
+  it('reports a recorded-but-unreadable file as not undoable, with the reason', async () => {
+    // 有基线(登记时给了 beforeText),但文件随后读不到了:这时原因必须是
+    // file-unreadable 而不是 no-baseline —— 前者在文件恢复后即可撤销。
+    const fs = new FakeFs({ [A]: A1 })
     const r = make(fs)
-    await r.recordChange({ turn: 1, step: 1, path: A, oldText: null, newText: A1 })
-    expect(r.hasPending(A)).toBe(true)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: A0, newText: A1, beforeText: A0 })
+    fs.contents.delete(A)
     const views = await r.fileViews()
-    expect(views[0]!.hashMatches).toBe(true) // 读不到 → 视为一致(不误报)
+    expect(views[0]!.canUndo).toBe(false)
+    expect(views[0]!.undoBlockedBy).toBe('file-unreadable')
+  })
+
+  it('reports an existing file with no baseline as blocked by no-baseline', async () => {
+    // 文件读得到,但登记时没有 beforeText → 没有可比基线,撤销无从谈起。
+    const fs = new FakeFs({ [A]: A1 })
+    const r = make(fs)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: A0, newText: A1 })
+    const views = await r.fileViews()
+    expect(views[0]!.canUndo).toBe(false)
+    expect(views[0]!.undoBlockedBy).toBe('no-baseline')
   })
 })
 
@@ -297,6 +321,47 @@ describe('seq cursor & idempotent replay', () => {
     await r.recordChanges([], 20)
     expect(r.snapshot().lastSeq).toBe(20)
     expect(r.snapshot().files).toEqual({})
+  })
+})
+
+describe('fileViews 的行数统计', () => {
+  it('counts added and removed lines against the baseline', async () => {
+    // A0 → A1 是一行被替换:1 增 1 删(与官方 ChangedFiles 同口径,不含上下文)。
+    const fs = new FakeFs({ [A]: A1 })
+    const r = make(fs)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: A0, newText: A1, beforeText: A0 })
+    const [view] = await r.fileViews()
+    expect(view!.added).toBe(1)
+    expect(view!.removed).toBe(1)
+  })
+
+  it('counts a pure insertion as additions only', async () => {
+    const fs = new FakeFs({ [A]: B1 })
+    const r = make(fs)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: null, newText: B1, beforeText: B0 })
+    const [view] = await r.fileViews()
+    expect(view!.added).toBe(2) // 空行 + func B
+    expect(view!.removed).toBe(0)
+  })
+
+  it('treats a created file as all-additions from an empty baseline', async () => {
+    const fs = new FakeFs({ [A]: A1 })
+    const r = make(fs)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: null, newText: '', created: true })
+    const [view] = await r.fileViews()
+    expect(view!.added).toBe(3) // A1 三行
+    expect(view!.removed).toBe(0)
+  })
+
+  it('omits the numbers for an unreadable file instead of reporting zero', async () => {
+    // 「读不到」和「没有改动」是两回事:前者不能显示成 +0 -0。
+    const fs = new FakeFs({ [A]: A1 })
+    const r = make(fs)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: A0, newText: A1, beforeText: A0 })
+    fs.contents.delete(A)
+    const [view] = await r.fileViews()
+    expect(view!.added).toBeUndefined()
+    expect(view!.removed).toBeUndefined()
   })
 })
 
@@ -553,7 +618,9 @@ describe('内容删除(del 行)', () => {
       if (row.kind !== 'del') continue
       expect(old[row.oldIndex!]).toBe(row.text)
     }
-    expect(hunkRows(hunk).filter(r2 => r2.kind === 'del').map(r2 => r2.oldIndex)).toEqual([2])
+    // 上面那条逐行比对才是真正的契约;这里另外钉住具体下标,防止 oldSideLines 的
+    // 编号基准被无意改动(下标把该块之前的上下文行算在内,故随 HUNK_CONTEXT 变)。
+    expect(hunkRows(hunk).filter(r2 => r2.kind === 'del').map(r2 => r2.oldIndex)).toEqual([1])
   })
 
   it('handles deleting the entire file content (every line removed)', async () => {
@@ -636,8 +703,10 @@ describe('文件删除(磁盘上已不存在)', () => {
     expect(await r.fileViews()).toHaveLength(0)
   })
 
-  it('a never-kept created file that is then deleted cannot be undone', async () => {
-    // 新建文件没有基线(内容为空是"新建"推断,不是可写回的旧内容)。
+  it('refuses undo of a never-kept created file once it is deleted', async () => {
+    // 新建文件有(空)基线,所以「不可撤销」不再来自 no-baseline,而是文件真的
+    // 不在了 —— 这个区分有意义:no-baseline 是"语义上无从撤销",
+    // file-unreadable 是"现在读不到",文件恢复后前者仍不可撤销、后者可以。
     const fs = new FakeFs()
     const r = make(fs)
     fs.agentWrite(A, A1)
@@ -646,7 +715,23 @@ describe('文件删除(磁盘上已不存在)', () => {
     const view = (await r.changesFor(A))!
     expect(view.created).toBe(true)
     expect(view.hunks).toEqual([])
-    expect(await r.canUndo(A)).toEqual({ ok: false, reason: 'no-baseline' })
+    expect(await r.canUndo(A)).toEqual({ ok: false, reason: 'file-unreadable' })
+  })
+
+  it('undoes a never-kept created file by clearing it', async () => {
+    // 撤销新建 = 写回空内容(它被创建时的样子)。harness 的 fs 契约没有删除能力,
+    // 清空是这套边界内可逆且可预测的语义。此前新建文件一律报 no-baseline,而预览里
+    // 却能正常显示整篇新增 —— 同一概念两处判据不一致。
+    const fs = new FakeFs()
+    const r = make(fs)
+    fs.agentWrite(A, 'created body\n')
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: null, newText: '', created: true })
+    expect(await r.canUndo(A)).toEqual({ ok: true })
+    const prep = await r.prepareUndo(A)
+    expect(prep.content).toBe('')
+    r.commitUndoWrite(prep.path)
+    // 撤销后条目消失,不再有未确认改动。
+    expect(await r.fileViews()).toHaveLength(0)
   })
 
   it('a deleted-then-recreated file diffs against the kept baseline', async () => {
