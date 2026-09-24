@@ -121,6 +121,34 @@ function baselineOf(file: PersistedFileState): string | null {
 }
 
 /**
+ * 该条目是否是「净零」改动:本次会话新建、如今已不存在。
+ *
+ * agent 常建临时文件再自己清掉(脚本、探查产物)。这种文件在工作区里的净效果
+ * 是**零** —— 之前不存在,现在也不存在 —— 列出它只是让待确认列表变长,而且
+ * 三件操作(Keep / 撤销 / 看 diff)一件都做不了,徒留一条不可操作的死行。
+ *
+ * 判据必须同时满足两条,缺一不可:
+ *  - `created`:本条目经历过「新建」(write 时 before === null)。这是唯一能区分
+ *    「从来不存在」与「原本存在」的事实,已在状态里,不必另读磁盘;
+ *  - 当前读不到(`currentHash === null`):文件确实已经没了。
+ *
+ * **反例(绝不可一并隐藏)**:原本存在的文件被 agent 改过、随后又被删除 ——
+ * `created` 为假,那是一次**真实的删除**,用户必须看得到。
+ *
+ * 已知取舍:读不到既可能是文件被删,也可能是权限问题;`FileIo.readFacts` 把两者
+ * 都报成 null,这里无法再分辨。对「新建的文件」而言,被删是压倒性的常见情形,
+ * 故按删除处理。一旦文件重新出现(agent 再次写入),`created` 仍为真、读得到内容,
+ * 该条目立即恢复显示 —— 隐藏只发生在"此刻确实没有这个文件"的时候。
+ *
+ * @param file - 该文件的持久化状态。
+ * @param facts - 刚读到的文件事实。
+ * @returns true 表示这条改动没有可确认的内容,应从待确认视图中略去。
+ */
+export function isNetZero(file: PersistedFileState, facts: FileFacts): boolean {
+  return file.created && facts.currentHash === null
+}
+
+/**
  * 组装某文件的改动视图(hunks + 各项能力位)。
  *
  * 当前内容不可读、无基线、或任一侧超过 {@link DIFF_TEXT_MAX} 时,hunks 为空数组
@@ -565,6 +593,10 @@ export class ChangeRegistry {
     for (const file of Object.values(this.state.files)) {
       if (!hasPending(file)) continue
       const facts = await this.io.readFacts(file.path).catch(() => ({ currentContent: null, currentHash: null }))
+      // 新建后又被删掉的文件,净效果为零且三件操作都无从谈起 —— 不进列表。
+      // 过滤放在这里(而不是渲染层)是必须的:列表计数、合计统计、每轮末尾那条
+      // 也都从 files 派生,在这里略去才能让它们一致。
+      if (isNetZero(file, facts)) continue
       const canUndo = baselineOf(file) !== null
         && facts.currentHash !== null
         && facts.currentHash === file.lastKnownHash

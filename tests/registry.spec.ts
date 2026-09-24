@@ -750,3 +750,83 @@ describe('文件删除(磁盘上已不存在)', () => {
     expect(view.hunks[0]!.removed).toBe(1)
   })
 })
+
+/**
+ * 净零改动:本次会话新建、随后又被删掉的文件。
+ *
+ * agent 常写临时脚本/探查产物再自己清掉。这种文件在工作区里的净效果是零,
+ * 列出来既无内容可看也无操作可做 —— 用户看到的只是一行不可撤销的死条目。
+ *
+ * 但**判据必须窄**:原本存在的文件被改又被删,是真实删除,绝不能一并藏掉。
+ * 下面正反两组用例把这个边界钉死。
+ */
+describe('net-zero created-then-deleted files', () => {
+  it('hides a file created this session and since deleted', async () => {
+    const fs = new FakeFs()
+    const r = make(fs)
+    fs.agentWrite(A, A1)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: null, newText: '', created: true })
+    fs.contents.delete(A) // agent 自己清掉了临时文件
+    expect(await r.fileViews()).toEqual([])
+  })
+
+  it('does not hide a pre-existing file that was changed and then deleted', async () => {
+    // 这是必须保留的反例:文件本来就在,被改过又被删 —— 用户得知道它没了。
+    const fs = new FakeFs({ [A]: A1 })
+    const r = make(fs)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: A0, newText: A1, beforeText: A0 })
+    fs.contents.delete(A)
+    const views = await r.fileViews()
+    expect(views).toHaveLength(1)
+    expect(views[0]!.path).toBe(A)
+    expect(views[0]!.undoBlockedBy).toBe('file-unreadable')
+  })
+
+  it('does not hide a created file that still exists', async () => {
+    const fs = new FakeFs()
+    const r = make(fs)
+    fs.agentWrite(A, A1)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: null, newText: '', created: true })
+    expect(await r.fileViews()).toHaveLength(1)
+  })
+
+  it('hides only the vanished file, leaving its siblings listed', async () => {
+    const fs = new FakeFs({ [B]: B1 })
+    const r = make(fs)
+    fs.agentWrite(A, A1)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: null, newText: '', created: true })
+    await r.recordChange({ turn: 1, step: 2, path: B, oldText: B0, newText: B1, beforeText: B0 })
+    fs.contents.delete(A)
+    const views = await r.fileViews()
+    expect(views.map(v => v.path)).toEqual([B])
+  })
+
+  it('brings the entry back if the file reappears', async () => {
+    // 隐藏是"此刻没有这个文件"的即时判断,不是删除历史。agent 再写一次同一路径,
+    // 条目必须立刻恢复 —— 否则用户会以为改动凭空消失了。
+    const fs = new FakeFs()
+    const r = make(fs)
+    fs.agentWrite(A, A1)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: null, newText: '', created: true })
+    fs.contents.delete(A)
+    expect(await r.fileViews()).toEqual([])
+    fs.agentWrite(A, A2)
+    await r.recordChange({ turn: 2, step: 1, path: A, oldText: A1, newText: A2 })
+    const views = await r.fileViews()
+    expect(views).toHaveLength(1)
+    expect(views[0]!.turns).toEqual([1, 2])
+  })
+
+  it('still tracks the hidden entry, so a later keep does not resurrect it', async () => {
+    // 只从**待确认视图**里略去,不动状态机:文件级语义(keep 是对文件的操作)
+    // 不因呈现层的取舍而改变。
+    const fs = new FakeFs()
+    const r = make(fs)
+    fs.agentWrite(A, A1)
+    await r.recordChange({ turn: 1, step: 1, path: A, oldText: null, newText: '', created: true })
+    fs.contents.delete(A)
+    expect(r.hasPending(A)).toBe(true)
+    await r.keep(A)
+    expect(r.snapshot().files[A]).toBeUndefined()
+  })
+})
