@@ -3,7 +3,7 @@
  *
  * JSON API: /striatum/api/<method> (state / keep / undo)
  * SSE:      /striatum/events(登记/keep/undo 后广播)
- * 信任篱笆:loopback + webRuntime.trustedHosts(参照 dsh-thalamus)。
+ * 信任篱笆:loopback + webStartup.trustedHosts(参照 dsh-thalamus)。
  */
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
@@ -121,18 +121,18 @@ interface WebServerService {
   register(route: WebRoute): () => void
 }
 
-/** webRuntime 结构面。 */
-interface WebRuntimeService {
+/** webStartup 结构面。 */
+interface WebStartupService {
   trustedHosts: string[]
 }
 
 /** 注册 /striatum API 路由 + SSE(依赖 StriatumServiceFace,无循环依赖)。 */
 export function registerStriatumApi(
-  ctx: Context & { webServer: WebServerService; webRuntime: WebRuntimeService },
+  ctx: Context & { webServer: WebServerService; webStartup: WebStartupService },
   service: StriatumServiceFace,
   sse: SseClients,
 ): void {
-  const trustedHosts = () => ctx.webRuntime.trustedHosts
+  const trustedHosts = () => ctx.webStartup.trustedHosts
 
   const apiRoute: WebRoute = {
     kind: 'prefix',

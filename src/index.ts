@@ -371,8 +371,8 @@ export function apply(ctx: Context, config: Config = {}): void {
     // capture:监听会话事件自动登记改动
     registerCapture(ctx, service)
 
-    // HTTP API + SSE(web profile 才有 webServer/webRuntime;headless 无 → 不注册)
-    ctx.inject(['webServer', 'webRuntime'], (apiCtx) => {
+    // HTTP API + SSE(web profile 才有 webServer/webStartup;headless 无 → 不注册)
+    ctx.inject(['webServer', 'webStartup'], (apiCtx) => {
       registerStriatumApi(apiCtx as never, service, service.sse)
     })
   })
